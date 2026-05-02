@@ -115,6 +115,21 @@ def test_dosage_missing_species_asks():
     assert any("вид" in q.lower() for q in (result.clarifying_questions or []))
 
 
+def test_dosage_reordered_skolko_dat_detected():
+    gate = SafetyGate()
+    result = gate.check("Сколько амоксициллина дать собаке 12 кг при пиодермии?")
+    assert result.intent == "dosage_request"
+    assert result.action == "ask_clarifying_questions"
+    assert any("форма" in q.lower() or "концентра" in q.lower() for q in (result.clarifying_questions or []))
+
+
+def test_paracetamol_kot_detects_cat_warning():
+    gate = SafetyGate()
+    result = gate.check("Кот съел таблетку парацетамола")
+    assert result.action == "answer_with_warning"
+    assert "paracetamol_in_cats" in result.risk_tags
+
+
 def test_dosage_missing_route_asks():
     gate = SafetyGate()
     result = gate.check("доза амоксициллина собаке 10 кг, при пиодермии, таблетки 250 мг, взрослый, не беременна, без почечной недостаточности, текущие препараты: нет")

@@ -17,7 +17,7 @@ from app.db.session import new_session
 from app.services import llm_router, prompt_manager, safety_gate
 
 
-DEFAULT_GOLDEN_SET = Path("artifacts") / "medical_golden_set_seed.json"
+DEFAULT_GOLDEN_SET = Path("quality") / "medical_golden_set_seed.json"
 _AUDIT_SESSION_FACTORY = None
 
 

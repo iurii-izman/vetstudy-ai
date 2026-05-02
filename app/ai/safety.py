@@ -28,18 +28,21 @@ class SafetyResult:
 
 
 class SafetyGate:
-    DOSAGE_PATTERN = re.compile(r"\b(доза|дозиров\w*|мг/кг|mg/kg|сколько\s+дать)\b", re.IGNORECASE)
+    DOSAGE_PATTERN = re.compile(
+        r"\b(доза|дозиров\w*|мг/кг|mg/kg|сколько\b.{0,50}\bдать|рассчита\w*\b.{0,50}\bдоз\w*)\b",
+        re.IGNORECASE,
+    )
     CLINICAL_CASE_PATTERN = re.compile(r"\b(симптом|анамнез|кейс|случай|диагноз|лечение)\b", re.IGNORECASE)
     EMERGENCY_PATTERN = re.compile(
         r"\b(не\s+дыш|судорог|коллапс|без\s+сознания|остановк[аи]\s+дыхания|сильн\w+\s+кровотеч|анафилакс|срочно|реанимац)\b",
         re.IGNORECASE,
     )
-    TOX_PATTERN = re.compile(r"\b(отрав\w*|токс\w*|яд\w*|парацетамол|acetaminophen)\b", re.IGNORECASE)
+    TOX_PATTERN = re.compile(r"\b(отрав\w*|токс\w*|яд\w*|парацетамол\w*|acetaminophen)\b", re.IGNORECASE)
     INTERACTION_PATTERN = re.compile(r"\b(\+|вместе|комбинац|взаимодейств)\b", re.IGNORECASE)
     UNCERTAIN_SOURCE_PATTERN = re.compile(r"\b(форум\w*|чатgpt|тикток|reddit|знаком\w+\s+сказал)\b", re.IGNORECASE)
 
-    CAT_PATTERN = re.compile(r"\b(кошк\w*|cat)\b", re.IGNORECASE)
-    DOG_PATTERN = re.compile(r"\b(собак\w*|dog)\b", re.IGNORECASE)
+    CAT_PATTERN = re.compile(r"\b(кошк\w*|кот|кота|коту|котом|котен\w*|cat)\b", re.IGNORECASE)
+    DOG_PATTERN = re.compile(r"\b(собак\w*|пес|пёс|пса|псу|dog)\b", re.IGNORECASE)
     WEIGHT_PATTERN = re.compile(r"\b\d+(?:[.,]\d+)?\s?(кг|kg)\b", re.IGNORECASE)
     AGE_PATTERN = re.compile(r"\b(\d+\s?(мес|месяц|лет|год)|щенок|котенок|пожил\w*|senior)\b", re.IGNORECASE)
     INDICATION_PATTERN = re.compile(r"\b(при|для|из-за|диагноз|артрит|боль|лихорад)\b", re.IGNORECASE)
@@ -53,7 +56,7 @@ class SafetyGate:
     )
 
     NSAID_PATTERN = re.compile(r"\b(нпвс|nsaid|мелоксикам|карпрофен|кетопрофен)\b", re.IGNORECASE)
-    PARACETAMOL_PATTERN = re.compile(r"\b(парацетамол|acetaminophen)\b", re.IGNORECASE)
+    PARACETAMOL_PATTERN = re.compile(r"\b(парацетамол\w*|acetaminophen)\b", re.IGNORECASE)
     IVERMECTIN_PATTERN = re.compile(r"\b(ивермектин|ivermectin)\b", re.IGNORECASE)
     MDR1_PATTERN = re.compile(r"\b(mdr1|колли|шелти|австралийск\w+\s+овчарк\w*)\b", re.IGNORECASE)
     STEROID_PATTERN = re.compile(r"\b(преднизолон|дексаметазон|стероид)\b", re.IGNORECASE)
