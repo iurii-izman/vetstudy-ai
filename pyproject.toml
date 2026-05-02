@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vetstudy-ai"
+version = "0.1.0"
+description = "VetStudy AI MVP-1"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "aiogram>=3.7.0",
+  "sqlalchemy>=2.0.30",
+  "alembic>=1.13.1",
+  "psycopg[binary]>=3.2.0",
+  "pgvector>=0.3.2",
+  "pydantic-settings>=2.3.1",
+  "python-dotenv>=1.0.1",
+  "httpx>=0.28.0",
+  "pypdf>=5.0.0",
+  "python-docx>=1.1.2",
+  "redis>=5.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+  "pytest-asyncio>=0.23.8",
+  "ruff>=0.11.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+include = ["app*"]

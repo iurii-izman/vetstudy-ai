@@ -1,0 +1,2 @@
+This is a small plain text fixture for document ingestion.
+It contains two short lines.
