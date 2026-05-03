@@ -4,7 +4,7 @@
 Этот гайд актуален для beta-окна **1-2 недели** и покрывает Telegram-first сценарии, web API, безопасность, стабильность и качество ответов.
 
 ## Быстрый старт
-1. Проверить `.env` и обязательные переменные (`TELEGRAM_BOT_TOKEN`, `DATABASE_URL`, `USER_ID_HASH_SALT`, `WEB_OWNER_TELEGRAM_ID`, `WEB_OWNER_PASSWORD`, `WEB_OWNER_TOKEN`, ключ провайдера).
+1. Проверить `.env` и обязательные переменные (`TELEGRAM_BOT_TOKEN`, `DATABASE_URL`, `USER_ID_HASH_SALT`, `WEB_OWNER_TELEGRAM_ID`, `WEB_OWNER_PASSWORD_HASH` или `WEB_OWNER_PASSWORD`, `WEB_OWNER_TOKEN`, `WEB_SESSION_SECRET`, ключ провайдера). Для beta можно временно использовать `ALLOWED_TELEGRAM_USERNAMES`, но после первого `/start` лучше заменить/дополнить стабильным Telegram ID.
 2. Запустить сервис (`docker compose up --build` или локально API + polling/webhook).
 3. Проверить `/health` и `/ready`.
 4. В Telegram: `/start`, `/help`, затем `/bind_topic <slug>` или `/create_default_topics`.

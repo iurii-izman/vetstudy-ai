@@ -29,6 +29,12 @@ class OpenAICompatProvider:
         self.api_key = api_key
         self.model = model
         self.timeout_s = timeout_s
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout_s)
+        return self._client
 
     async def generate(self, messages, system_prompt, response_format=None, tools=None, metadata=None) -> LLMResponse:
         if not self.api_key:
@@ -44,12 +50,11 @@ class OpenAICompatProvider:
         if tools:
             payload["tools"] = tools
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
-                resp = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    json=payload,
-                    headers=self._headers(),
-                )
+            resp = await self._get_client().post(
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                headers=self._headers(),
+            )
             if resp.status_code == 401:
                 raise LLMAuthError(f"{self.name} authentication failed")
             if resp.status_code == 429:
@@ -82,12 +87,11 @@ class OpenAICompatProvider:
             raise LLMAuthError(f"{self.name} API key is missing")
         payload = {"model": self.model, "input": texts}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
-                resp = await client.post(
-                    f"{self.base_url}/embeddings",
-                    json=payload,
-                    headers=self._headers(),
-                )
+            resp = await self._get_client().post(
+                f"{self.base_url}/embeddings",
+                json=payload,
+                headers=self._headers(),
+            )
             if resp.status_code == 401:
                 raise LLMAuthError(f"{self.name} authentication failed")
             if resp.status_code == 429:
@@ -109,12 +113,11 @@ class OpenAICompatProvider:
             raise LLMAuthError(f"{self.name} API key is missing")
         files = {"file": (filename, audio_bytes), "model": (None, self.model)}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
-                resp = await client.post(
-                    f"{self.base_url}/audio/transcriptions",
-                    files=files,
-                    headers=self._headers(),
-                )
+            resp = await self._get_client().post(
+                f"{self.base_url}/audio/transcriptions",
+                files=files,
+                headers=self._headers(),
+            )
             if resp.status_code == 401:
                 raise LLMAuthError(f"{self.name} authentication failed")
             if resp.status_code == 429:
@@ -149,6 +152,12 @@ class GeminiProvider:
         self.api_key = api_key
         self.timeout_s = timeout_s
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout_s)
+        return self._client
 
     async def generate(self, messages, system_prompt, response_format=None, tools=None, metadata=None) -> LLMResponse:
         if not self.api_key:
@@ -162,12 +171,11 @@ class GeminiProvider:
             "contents": contents,
         }
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
-                resp = await client.post(
-                    f"{self.base_url}/models/{self.model}:generateContent",
-                    params={"key": self.api_key},
-                    json=payload,
-                )
+            resp = await self._get_client().post(
+                f"{self.base_url}/models/{self.model}:generateContent",
+                params={"key": self.api_key},
+                json=payload,
+            )
             if resp.status_code == 401:
                 raise LLMAuthError("gemini authentication failed")
             if resp.status_code == 429:
@@ -198,22 +206,22 @@ class GeminiProvider:
             raise LLMAuthError("gemini API key is missing")
         vectors: list[list[float]] = []
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
-                for text in texts:
-                    resp = await client.post(
-                        f"{self.base_url}/models/{self.model}:embedContent",
-                        params={"key": self.api_key},
-                        json={"content": {"parts": [{"text": text}]}}
-                    )
-                    if resp.status_code == 401:
-                        raise LLMAuthError("gemini authentication failed")
-                    if resp.status_code == 429:
-                        raise LLMRateLimitError("gemini rate limited")
-                    if resp.status_code >= 500:
-                        raise LLMTransientError(f"gemini server error {resp.status_code}")
-                    resp.raise_for_status()
-                    data = resp.json()
-                    vectors.append(((data.get("embedding") or {}).get("values")) or [])
+            client = self._get_client()
+            for text in texts:
+                resp = await client.post(
+                    f"{self.base_url}/models/{self.model}:embedContent",
+                    params={"key": self.api_key},
+                    json={"content": {"parts": [{"text": text}]}}
+                )
+                if resp.status_code == 401:
+                    raise LLMAuthError("gemini authentication failed")
+                if resp.status_code == 429:
+                    raise LLMRateLimitError("gemini rate limited")
+                if resp.status_code >= 500:
+                    raise LLMTransientError(f"gemini server error {resp.status_code}")
+                resp.raise_for_status()
+                data = resp.json()
+                vectors.append(((data.get("embedding") or {}).get("values")) or [])
         except httpx.TimeoutException as exc:
             raise LLMTransientError("gemini timeout") from exc
         except httpx.HTTPError as exc:

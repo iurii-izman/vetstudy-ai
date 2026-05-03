@@ -31,6 +31,10 @@ describe('App', () => {
       if (u.includes('/messages')) return { ok: true, json: async () => [] }
       if (u.includes('/flashcards')) return { ok: true, json: async () => [] }
       if (u.includes('/memory/search')) return { ok: true, json: async () => [{ id: 's1', content: 'Found item', kind: 'note' }] }
+      if (u.includes('/admin/errors')) return { ok: true, json: async () => [{ id: 'e1', category: 'provider_timeout' }] }
+      if (u.includes('/admin/feedback')) return { ok: true, json: async () => [{ id: 'f1', feedback_type: 'down', status: 'new' }] }
+      if (u.includes('/admin/costs')) return { ok: true, json: async () => [{ user_id: 'u1', provider: 'mock', model: 'm1', calls: 1, cost_usd: 0.1 }] }
+      if (u.includes('/topics/graph')) return { ok: true, json: async () => ({ nodes: [{ id: 'n1', title: 'Surgery' }], edges: [] }) }
       return { ok: true, json: async () => ({}) }
     })
 
@@ -45,5 +49,36 @@ describe('App', () => {
     await userEvent.click(screen.getByText('Search'))
 
     await waitFor(() => expect(screen.getByText('Found item')).toBeInTheDocument())
+  })
+
+  it('renders review and admin screens', async () => {
+    localStorage.setItem('vetstudy-token', token)
+    global.fetch = vi.fn(async (url) => {
+      const u = String(url)
+      if (u.includes('/topics')) return { ok: true, json: async () => [{ id: '11111111-1111-1111-1111-111111111111', title: 'Surgery', subject_id: null }] }
+      if (u.includes('/stats')) return { ok: true, json: async () => ({ topics_total: 1, due_flashcards: 1 }) }
+      if (u.includes('/notes')) return { ok: true, json: async () => [] }
+      if (u.includes('/messages')) return { ok: true, json: async () => [] }
+      if (u.includes('/flashcards/')) return { ok: true, json: async () => ({}) }
+      if (u.includes('/flashcards')) return { ok: true, json: async () => [{ id: 'c1', front: 'Q', back: 'A', interval_days: 1 }] }
+      if (u.includes('/admin/errors')) return { ok: true, json: async () => [{ id: 'e1', category: 'provider_timeout' }] }
+      if (u.includes('/admin/feedback')) return { ok: true, json: async () => [{ id: 'f1', feedback_type: 'down', status: 'new' }] }
+      if (u.includes('/admin/costs')) return { ok: true, json: async () => [{ user_id: 'u1', provider: 'mock', model: 'm1', calls: 1, cost_usd: 0.1 }] }
+      if (u.includes('/topics/graph')) return { ok: true, json: async () => ({ nodes: [{ id: 'n1', title: 'Surgery' }], edges: [] }) }
+      return { ok: true, json: async () => ({}) }
+    })
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    )
+    await screen.findByText('VetStudy')
+    await userEvent.click(screen.getByText('Review'))
+    await screen.findByText('Ответ скрыт. Сначала раскройте карточку.')
+    await userEvent.click(screen.getByText('Reveal'))
+    await screen.findByText('A')
+    await userEvent.click(screen.getByText('Admin'))
+    await screen.findByText('Admin errors')
+    await screen.findByText('Negative feedback')
   })
 })

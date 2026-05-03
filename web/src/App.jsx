@@ -231,7 +231,7 @@ function MessageTimeline({ messages }) {
   )
 }
 
-function FlashcardList({ cards }) {
+function FlashcardList({ cards, onReview }) {
   if (!cards.length) {
     return <EmptyState title="Нет карточек" detail="Создайте карточки кнопкой под ответом бота или командой /cards." />
   }
@@ -246,9 +246,73 @@ function FlashcardList({ cards }) {
           <h3>{card.front}</h3>
           <p>{card.back}</p>
           <TagList tags={card.tags || []} />
+          <div className="button-row">
+            <button className="secondary-action" type="button" onClick={() => onReview(card.id, 'again')}>Again</button>
+            <button className="secondary-action" type="button" onClick={() => onReview(card.id, 'hard')}>Hard</button>
+            <button className="primary-action" type="button" onClick={() => onReview(card.id, 'good')}>Good</button>
+            <button className="primary-action" type="button" onClick={() => onReview(card.id, 'easy')}>Easy</button>
+          </div>
         </article>
       ))}
     </div>
+  )
+}
+
+function ReviewQueue({ cards, revealed, onReveal, onReview }) {
+  if (!cards.length) return <EmptyState title="Нет карточек к повторению" detail="Сгенерируйте карточки через /cards, затем откройте review." />
+  return (
+    <div className="cards-grid">
+      {cards.map((card) => (
+        <article className="flashcard" key={card.id}>
+          <header>
+            <span>Due {card.due_at ? formatDate(card.due_at) : 'now'}</span>
+            <strong>{card.interval_days || 0}d</strong>
+          </header>
+          <h3>{card.front}</h3>
+          {revealed[card.id] ? <p>{card.back}</p> : <p className="muted">Ответ скрыт. Сначала раскройте карточку.</p>}
+          <div className="button-row">
+            <button className="secondary-action" type="button" onClick={() => onReveal(card.id)}>Reveal</button>
+            <button className="secondary-action" type="button" onClick={() => onReview(card.id, 'again')}>Again</button>
+            <button className="secondary-action" type="button" onClick={() => onReview(card.id, 'hard')}>Hard</button>
+            <button className="primary-action" type="button" onClick={() => onReview(card.id, 'good')}>Good</button>
+            <button className="primary-action" type="button" onClick={() => onReview(card.id, 'easy')}>Easy</button>
+          </div>
+        </article>
+      ))}
+    </div>
+  )
+}
+
+function AdminView({ errors, feedback, costs, graph, analyticsSummary }) {
+  return (
+    <section className="settings-view">
+      <div className="settings-grid">
+        <div className="settings-panel">
+          <h2>Admin errors</h2>
+          <div className="timeline">
+            {errors.slice(0, 8).map((item) => <article className="message-row assistant" key={item.id}><p>{item.category}</p></article>)}
+          </div>
+        </div>
+        <div className="settings-panel">
+          <h2>Negative feedback</h2>
+          <div className="timeline">
+            {feedback.filter((x) => x.feedback_type !== 'up').slice(0, 8).map((item) => <article className="message-row user" key={item.id}><p>{item.feedback_type} · {item.status}</p></article>)}
+          </div>
+        </div>
+        <div className="settings-panel wide">
+          <h2>Costs</h2>
+          <pre className="stats-json">{JSON.stringify(costs.slice(0, 12), null, 2)}</pre>
+        </div>
+        <div className="settings-panel wide">
+          <h2>Topic graph</h2>
+          <pre className="stats-json">{JSON.stringify(graph, null, 2)}</pre>
+        </div>
+        <div className="settings-panel wide">
+          <h2>Product analytics summary</h2>
+          <pre className="stats-json">{JSON.stringify(analyticsSummary || {}, null, 2)}</pre>
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -258,6 +322,7 @@ function Workspace({
   notes,
   messages,
   flashcards,
+  onReviewCard,
   searchResults,
   onEditNote,
   loadingTopic,
@@ -290,7 +355,7 @@ function Workspace({
         <MemoryList items={searchResults.length ? searchResults : notes} onEdit={searchResults.length ? null : onEditNote} sourceLabel="memory" />
       ) : null}
       {activePanel === 'dialog' ? <MessageTimeline messages={messages} /> : null}
-      {activePanel === 'cards' ? <FlashcardList cards={flashcards} /> : null}
+      {activePanel === 'cards' ? <FlashcardList cards={flashcards} onReview={onReviewCard} /> : null}
     </section>
   )
 }
@@ -327,6 +392,10 @@ function SettingsView({ me, stats, subjects, modelSettings, onExport, onLogout, 
             <dd>{me?.role || 'n/a'}</dd>
             <dt>Language</dt>
             <dd>{me?.language || 'n/a'}</dd>
+            <dt>Region</dt>
+            <dd>{me?.profile?.region || 'unspecified'}</dd>
+            <dt>Species focus</dt>
+            <dd>{me?.profile?.species_focus || 'dog_cat'}</dd>
           </dl>
           <div className="button-row">
             <button className="primary-action" type="button" onClick={onExport} disabled={exportBusy}>
@@ -372,8 +441,15 @@ function Dashboard({ token, onLogout }) {
   const [stats, setStats] = useState(EMPTY_STATS)
   const [me, setMe] = useState(null)
   const [modelSettings, setModelSettings] = useState(null)
+  const [adminErrors, setAdminErrors] = useState([])
+  const [adminFeedback, setAdminFeedback] = useState([])
+  const [adminCosts, setAdminCosts] = useState([])
+  const [topicGraph, setTopicGraph] = useState({ nodes: [], edges: [] })
+  const [analyticsSummary, setAnalyticsSummary] = useState({})
   const [searchQuery, setSearchQuery] = useState('')
+  const [searchFacets, setSearchFacets] = useState({ kind: '', tag: '', dateFrom: '', dateTo: '' })
   const [searchResults, setSearchResults] = useState([])
+  const [revealedCards, setRevealedCards] = useState({})
   const [activePanel, setActivePanel] = useState('memory')
   const [editingNote, setEditingNote] = useState(null)
   const [error, setError] = useState('')
@@ -400,12 +476,17 @@ function Dashboard({ token, onLogout }) {
     setError('')
     setLoadingApp(true)
     try {
-      const [topicsData, subjectsData, statsData, meData, modelData] = await Promise.all([
+      const [topicsData, subjectsData, statsData, meData, modelData, errorsData, feedbackData, costsData, graphData, analyticsData] = await Promise.all([
         api.topics(token),
         api.subjects(token).catch(() => []),
         api.stats(token).catch(() => EMPTY_STATS),
         api.me(token).catch(() => null),
         api.modelSettings(token).catch(() => null),
+        api.adminErrors(token).catch(() => []),
+        api.adminFeedback(token).catch(() => []),
+        api.adminCosts(token).catch(() => []),
+        api.topicGraph(token).catch(() => ({ nodes: [], edges: [] })),
+        api.adminAnalyticsSummary(token).catch(() => ({})),
       ])
       const safeTopics = Array.isArray(topicsData) ? topicsData : []
       setTopics(safeTopics)
@@ -413,6 +494,11 @@ function Dashboard({ token, onLogout }) {
       setStats({ ...EMPTY_STATS, ...(statsData || {}) })
       setMe(meData)
       setModelSettings(modelData)
+      setAdminErrors(Array.isArray(errorsData) ? errorsData : [])
+      setAdminFeedback(Array.isArray(feedbackData) ? feedbackData : [])
+      setAdminCosts(Array.isArray(costsData) ? costsData : [])
+      setTopicGraph(graphData || { nodes: [], edges: [] })
+      setAnalyticsSummary(analyticsData || {})
       setActiveTopic((current) => current || safeTopics[0] || null)
     } catch (err) {
       setError(err.message)
@@ -465,7 +551,7 @@ function Dashboard({ token, onLogout }) {
     setError('')
     setLoadingTopic(true)
     try {
-      const data = await api.search(token, query, activeTopic?.id)
+      const data = await api.search(token, query, activeTopic?.id, searchFacets)
       setSearchResults(Array.isArray(data) ? data : [])
       setActivePanel('memory')
     } catch (err) {
@@ -488,6 +574,24 @@ function Dashboard({ token, onLogout }) {
     } finally {
       setSavingNote(false)
     }
+  }
+
+  const reviewCard = async (cardId, action) => {
+    try {
+      await api.reviewFlashcard(token, cardId, action)
+      setRevealedCards((prev) => {
+        const copy = { ...prev }
+        delete copy[cardId]
+        return copy
+      })
+      await loadTopic()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const revealCard = (cardId) => {
+    setRevealedCards((prev) => ({ ...prev, [cardId]: true }))
   }
 
   const exportData = async () => {
@@ -515,6 +619,7 @@ function Dashboard({ token, onLogout }) {
   const clearSearch = () => {
     setSearchQuery('')
     setSearchResults([])
+    setSearchFacets({ kind: '', tag: '', dateFrom: '', dateTo: '' })
   }
 
   return (
@@ -567,9 +672,13 @@ function Dashboard({ token, onLogout }) {
             <button className="secondary-action" type="button" onClick={clearSearch}>
               Clear
             </button>
+            <input placeholder="kind" value={searchFacets.kind} onChange={(event) => setSearchFacets((prev) => ({ ...prev, kind: event.target.value }))} />
+            <input placeholder="tag" value={searchFacets.tag} onChange={(event) => setSearchFacets((prev) => ({ ...prev, tag: event.target.value }))} />
           </div>
           <nav className="main-nav">
             <NavLink to="/">Workspace</NavLink>
+            <NavLink to="/review">Review</NavLink>
+            <NavLink to="/admin">Admin</NavLink>
             <NavLink to="/summary">Summary</NavLink>
             <NavLink to="/settings">Settings</NavLink>
           </nav>
@@ -580,6 +689,12 @@ function Dashboard({ token, onLogout }) {
           <StatTile label="Messages" value={stats.messages_total} tone="green" />
           <StatTile label="Memory" value={stats.notes_total} tone="neutral" />
           <StatTile label="Due cards" value={stats.due_flashcards} tone="amber" />
+        </section>
+        <section className="status-strip" aria-label="Admin status">
+          <StatTile label="Errors" value={adminErrors.length} tone="amber" />
+          <StatTile label="Feedback↓" value={adminFeedback.filter((x) => x.feedback_type !== 'up').length} tone="blue" />
+          <StatTile label="Feedback↑" value={adminFeedback.filter((x) => x.feedback_type === 'up').length} tone="green" />
+          <StatTile label="All feedback" value={adminFeedback.length} tone="neutral" />
         </section>
 
         {error ? (
@@ -605,6 +720,7 @@ function Dashboard({ token, onLogout }) {
                   onEditNote={setEditingNote}
                   searchResults={searchResults}
                   setActivePanel={setActivePanel}
+                  onReviewCard={reviewCard}
                 />
                 <NoteEditor busy={savingNote} note={editingNote} onCancel={() => setEditingNote(null)} onSave={saveNote} />
               </div>
@@ -613,6 +729,14 @@ function Dashboard({ token, onLogout }) {
           <Route
             path="/summary"
             element={<SummaryView activeTopic={activeTopic} cards={flashcards} messages={messages} notes={notes} />}
+          />
+          <Route
+            path="/review"
+            element={<ReviewQueue cards={flashcards} revealed={revealedCards} onReveal={revealCard} onReview={reviewCard} />}
+          />
+          <Route
+            path="/admin"
+            element={<AdminView errors={adminErrors} feedback={adminFeedback} costs={adminCosts} graph={topicGraph} analyticsSummary={analyticsSummary} />}
           />
           <Route
             path="/settings"

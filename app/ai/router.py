@@ -14,6 +14,7 @@ from app.ai.validators import PostGenerationValidator
 from app.config import Settings
 from app.db.models import ModelCall
 from app.db.repositories import ModelCallRepo
+from app.db.repositories import ErrorEventRepo
 from app.observability import safe_user_id
 
 logger = logging.getLogger("app.ai.router")
@@ -73,6 +74,7 @@ class LLMRouter:
         self.embeddings = embeddings
         self.cost_guard = CostGuard(settings)
         self.validator = PostGenerationValidator()
+        self._provider_locks: dict[str, asyncio.Semaphore] = {}
 
     async def generate(
         self,
@@ -97,14 +99,16 @@ class LLMRouter:
                 continue
             t0 = time.perf_counter()
             try:
-                response = await self._retry_generate(
-                    provider=provider,
-                    messages=payload_messages,
-                    system_prompt=system_prompt,
-                    response_format=response_format,
-                    tools=tools,
-                    metadata={**(metadata or {}), "purpose": purpose, "model": model},
-                )
+                limiter = self._provider_locks.setdefault(provider.name, asyncio.Semaphore(4))
+                async with limiter:
+                    response = await self._retry_generate(
+                        provider=provider,
+                        messages=payload_messages,
+                        system_prompt=system_prompt,
+                        response_format=response_format,
+                        tools=tools,
+                        metadata={**(metadata or {}), "purpose": purpose, "model": model},
+                    )
                 latency_ms = int((time.perf_counter() - t0) * 1000)
                 validated = self.validator.validate(question=payload_messages[-1].get("content", ""), answer=response.text)
                 response.text = validated.rewritten_answer
@@ -123,6 +127,12 @@ class LLMRouter:
                     "failed",
                 )
                 self._log_structured("failed", provider.name, model, purpose, latency_ms, str(exc), user_id, self.settings.user_id_hash_salt)
+                ErrorEventRepo(db).add(
+                    user_id=user_id,
+                    scope="provider",
+                    category="provider_call_failed",
+                    details={"provider": provider.name, "model": model, "purpose": purpose, "error": str(exc)},
+                )
                 continue
         if isinstance(last_error, LLMAuthError):
             return f"Ошибка AI-конфигурации: {last_error}"

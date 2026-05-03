@@ -1,176 +1,155 @@
 # VetStudy AI
 
-Production-ready backend for Telegram-first VetStudy AI.
+VetStudy AI is a Telegram-first educational assistant for veterinary study, virtual case practice, notes, flashcards, retrieval, and beta feedback loops.
+
+> Educational beta only. VetStudy AI does not create a veterinarian-client-patient relationship, diagnosis, prescription, dosage authorization, or treatment plan for real animals. AI output can be incomplete or wrong and must be checked against current labels, formularies, and clinical judgment.
+
+## Status
+
+- Release line: `v0.1.0-beta.1`
+- Audience: private closed beta for trusted study use
+- Primary interface: Telegram bot with forum topics
+- Operator interface: FastAPI web cabinet
+- Deployment target: Docker Compose or container platform with Postgres and Redis
+
+## Product Surface
+
+- Telegram commands: `/start`, `/help`, `/topics`, `/bind_topic`, `/create_default_topics`, `/new`, `/mode`, `/summary`, `/search`, `/save`, `/cards`, `/quiz`, `/review`, `/docs`, `/export`
+- Learning memory: user-scoped notes, summaries, saved answers, search, Anki/Markdown exports
+- Flashcards: generation, spaced-review actions, review event tracking
+- Documents: TXT/MD/PDF/DOCX extraction and Redis-backed indexing jobs
+- AI safety: allowlist, quota guard, high-risk detection, prompt policy, post-generation validators, model fallback
+- Admin: provider costs, feedback, errors, topic graph, product analytics, evidence source coverage
 
 ## Stack
-- FastAPI + aiogram
-- PostgreSQL (+pgvector)
-- Redis (required for durable document indexing jobs)
-- Alembic migrations
 
-## Quick start (new server)
-1. Clone repo.
-2. Copy env file:
+- Python 3.12, FastAPI, aiogram
+- PostgreSQL with pgvector-ready schema
+- Redis Streams for document indexing jobs
+- Alembic migrations
+- React + Vite web cabinet
+- Docker Compose local beta stack
+
+## Quick Start
+
 ```bash
 cp .env.example .env
 ```
-3. Fill required secrets in `.env`.
-4. Start local stack:
+
+Fill required secrets in `.env`, then run:
+
 ```bash
 docker compose up --build
 ```
-5. Verify:
-- `GET /health` -> `200 {"status":"ok"}`
-- `GET /ready` -> `200` when DB and Redis are ready.
 
-For free beta provider setup see `FREE_API_SETUP.md`.
+Verify:
 
-## Docker
-### Production Dockerfile
-- Multi-stage build.
-- Non-root runtime user.
-- Built-in healthcheck.
-- Runs migrations before API startup.
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/ready
+```
 
-### Local dev compose
-`docker-compose.yml` starts:
-- `backend`
-- `bot`
-- `media-worker`
-- `postgres`
-- `redis`
+For provider setup, use `docs/setup/FREE_API_SETUP.md`.
 
-Backend healthcheck uses `/ready`.
-Redis is started with AOF persistence and a named volume so queued document jobs survive API/container restarts.
+## Local Development
 
-## Health checks
-- `/health`: liveness
-- `/ready`: readiness with dependencies
-  - DB: mandatory (`SELECT 1`)
-  - Redis: mandatory when `REDIS_URL` is set
+Backend:
 
-## Document indexing queue
-Document uploads are recorded as `queued` in the user's document list, then serialized into a Redis Streams queue (`media:document_index_jobs` by default). The `media-worker` process consumes that stream and preserves the existing status contract:
-- success: `queued -> indexed`
-- failure: `queued -> failed` with a `document_index_failed` `ErrorEvent`
+```bash
+python -m pip install -r requirements-dev.lock
+python -m pip install -e . --no-deps
+alembic upgrade head
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
-The worker acknowledges a Redis message only after the document is marked `indexed` or `failed`. Jobs may be delivered more than once after a worker crash, so every document entry has a `job_id`; already completed jobs are skipped on retry.
+Telegram polling:
 
-Run a worker outside Docker with:
+```bash
+python -m app.run_polling
+```
+
+Document worker:
+
 ```bash
 python -m app.media.worker
 ```
 
-## Structured logging
-JSON logs include:
-- `request_id`
-- safe telegram user id hash (`telegram_user_id`)
-- `provider` / `model`
-- `latency_ms`
-- `error_category`
+Frontend:
 
-Stack traces are logged only server-side (`exc_info`) and never returned to user.
-
-## Error handling
-- API returns user-safe messages.
-- Unexpected exceptions return generic `500` message.
-- Telegram pipeline catches DB and runtime errors and sends safe replies without crashing the process.
-
-## Backup and restore
-### Backup script
 ```bash
-export DATABASE_URL='postgresql://...'
-./scripts/backup_pg.sh
+cd web
+npm ci
+npm run dev
 ```
-Creates `./backups/vetstudy_YYYYmmdd_HHMMSS.dump`.
 
-### Restore
+## Validation
+
 ```bash
-pg_restore --clean --if-exists --no-owner --dbname "$DATABASE_URL" ./backups/<file>.dump
+python -m ruff check .
+python -m pytest -q
+alembic upgrade head
+cd web && npm test && npm run build
 ```
 
-### Scheduled backups (cron)
-Example daily backup at 03:30:
-```cron
-30 3 * * * cd /opt/vetstudy && DATABASE_URL='postgresql://...' BACKUP_DIR='/opt/vetstudy/backups' ./scripts/backup_pg.sh >> /var/log/vetstudy-backup.log 2>&1
-```
+Beta preflight:
 
-## Deployment
-### VPS (Docker)
-1. Provision server with Docker + Compose plugin.
-2. Put `.env` on server (do not commit).
-3. Run:
-```bash
-docker compose pull || true
-docker compose up -d --build
-```
-4. Put reverse proxy (Nginx/Caddy) with TLS in front of `:8000`.
-5. For Telegram webhook set:
-- `TELEGRAM_MODE=webhook`
-- `WEBHOOK_URL=https://your-domain`
-- `WEBHOOK_PATH=/telegram/webhook`
-
-### Railway / Render / Fly.io
-- Build from `Dockerfile`.
-- Set all required env vars from section below.
-- Ensure persistent Postgres is attached.
-- Run command:
-```bash
-alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
-```
-- Run a separate worker process:
-```bash
-python -m app.media.worker
-```
-- Healthcheck path: `/ready`.
-
-### Supabase DB
-Use Supabase Postgres connection string in `DATABASE_URL`, for example:
-```env
-DATABASE_URL=postgresql+psycopg://postgres:<password>@<host>:5432/postgres?sslmode=require
-```
-Then run migrations (`alembic upgrade head`) on deploy.
-
-## Secrets policy
-- `.env` is ignored by git.
-- Keep real secrets only in runtime environment.
-- Rotate API keys if accidentally exposed.
-
-## CI
-GitHub Actions runs:
-- `ruff check app`
-- `alembic upgrade head` (migration check against Postgres service)
-- `pytest -q`
-- frontend tests/build
-
-## Beta preflight
-Run before opening beta:
 ```bash
 python scripts/preflight_check.py --db --schema --provider
 python scripts/quality_audit.py
+python scripts/project_scorecard.py --database-url "$DATABASE_URL"
 ```
-The quality audit writes JSON/Markdown artifacts under `artifacts/quality_audit/` for manual medical review.
-Default `quality_audit` mode now runs the runtime safety/prompt/router/validator pipeline; use `--direct-prompt` only for legacy comparison.
 
-## Required secrets/env for production
+The quality audit writes generated review artifacts under `artifacts/quality_audit/`; those files are intentionally ignored.
+
+## Environment
+
+Required for beta:
+
 - `TELEGRAM_BOT_TOKEN`
 - `DATABASE_URL`
+- `REDIS_URL`
 - `USER_ID_HASH_SALT`
 - `WEB_OWNER_TELEGRAM_ID`
-- `WEB_OWNER_PASSWORD`
+- `WEB_OWNER_PASSWORD_HASH` or `WEB_OWNER_PASSWORD`
 - `WEB_OWNER_TOKEN`
-- provider key based on selected provider:
-  - `OPENAI_API_KEY` or
-  - `OPENROUTER_API_KEY` or
-  - `GROQ_API_KEY` or
-  - `GEMINI_API_KEY`
+- `WEB_SESSION_SECRET`
+- at least one provider key: `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, or `GEMINI_API_KEY`
 
-## Recommended production env
+Recommended:
+
 - `APP_ENV=prod`
 - `DEBUG=false`
-- `TELEGRAM_MODE=webhook`
-- `WEBHOOK_URL=https://<your-domain>`
-- `REDIS_URL=redis://...`
-- `MEDIA_JOBS_STREAM=media:document_index_jobs`
-- `MEDIA_JOBS_GROUP=media-indexers`
+- `TELEGRAM_MODE=polling` for local private beta, `webhook` for hosted deployment
 - `ALLOWED_TELEGRAM_USER_IDS=<comma-separated ids>`
+- low daily/monthly cost limits until provider behavior is proven
+
+## Documentation
+
+- `docs/beta/RUNBOOK.md` - staging/prod operations
+- `docs/beta/RELEASE_CHECKLIST.md` - beta release checklist
+- `docs/beta/BETA_TEST_GUIDE.md` - manual Telegram/web test plan
+- `docs/beta/CLOSED_BETA_DECISIONS.md` - beta policy decisions and residual manual work
+- `docs/beta/KNOWN_LIMITATIONS.md` - current limits and go/no-go risks
+- `docs/ARCHITECTURE.md` - runtime modules and data flow
+- `quality/dosage_policy_transnistria.md` - numeric dosage source policy
+- `AGENTS.md` - AI-agent guardrails for future autonomous work
+
+## Security
+
+- `.env`, local data, backups, caches, build output, and audit artifacts are ignored.
+- GitHub secret scanning and push protection should stay enabled.
+- Web sessions are HMAC-signed, time-limited, and bound to the authenticated Telegram ID.
+- Prefer `WEB_OWNER_PASSWORD_HASH` for deployed environments.
+- See `SECURITY.md` for reporting and rotation guidance.
+
+## Release
+
+This repository is public for beta review, but it is not open source. See `LICENSE`.
+
+Before expanding beyond private beta:
+
+- rotate runtime secrets;
+- complete Telegram smoke in the real private group;
+- review quality audit outputs with a human veterinary reviewer;
+- verify restore from backup on a production-like database;
+- re-check provider terms, retention, pricing, and data-processing settings.

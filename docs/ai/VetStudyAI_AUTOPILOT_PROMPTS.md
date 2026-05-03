@@ -1,6 +1,6 @@
 # VetStudy AI: блоки работ для AI-автопилота
 
-Этот документ продолжает `VetStudyAI_FINAL_SPEC.md`.
+Этот документ продолжает `docs/ai/VetStudyAI_FINAL_SPEC.md`.
 
 Первый промпт из раздела 19 уже запущен и должен создать базовый каркас MVP-1. Ниже идут последующие крупные блоки реализации. Каждый блок можно отдавать AI-автопилоту отдельной задачей после завершения предыдущего.
 
@@ -8,7 +8,7 @@
 
 - Не переписывать архитектуру без необходимости.
 - Не ломать уже работающие команды.
-- Перед изменениями читать `VetStudyAI_FINAL_SPEC.md`, текущий `README.md`, `.env.example`, миграции и тесты.
+- Перед изменениями читать `docs/ai/VetStudyAI_FINAL_SPEC.md`, текущий `README.md`, `.env.example`, миграции и тесты.
 - После каждого блока запускать тесты и обновлять документацию.
 - Все настройки моделей, ключей, лимитов и Telegram id должны идти через env/config, не хардкодиться.
 
@@ -19,10 +19,10 @@
 Промпт для AI-автопилота:
 
 ```text
-Ты senior Python engineer. В проекте VetStudy AI уже создан стартовый каркас по VetStudyAI_FINAL_SPEC.md. Проведи инженерный аудит и стабилизируй базу.
+Ты senior Python engineer. В проекте VetStudy AI уже создан стартовый каркас по `docs/ai/VetStudyAI_FINAL_SPEC.md`. Проведи инженерный аудит и стабилизируй базу.
 
 Сделай:
-1. Прочитай VetStudyAI_FINAL_SPEC.md, README.md, .env.example, docker-compose.yml, Alembic migrations, app/config.py и текущие handlers.
+1. Прочитай `docs/ai/VetStudyAI_FINAL_SPEC.md`, README.md, .env.example, docker-compose.yml, Alembic migrations, app/config.py и текущие handlers.
 2. Проверь, что проект запускается локально через Docker Compose и без Docker, если это предусмотрено README.
 3. Исправь ошибки импорта, конфигурации, миграций, типов и async/sync несовместимости.
 4. Убедись, что в .env.example есть все переменные:
@@ -137,7 +137,7 @@ Acceptance criteria:
 Ты backend engineer. Доведи слой БД VetStudy AI до MVP-1.
 
 Сделай:
-1. Сверь модели SQLAlchemy и Alembic migrations с разделом 11 VetStudyAI_FINAL_SPEC.md.
+1. Сверь модели SQLAlchemy и Alembic migrations с разделом 11 `docs/ai/VetStudyAI_FINAL_SPEC.md`.
 2. Реализуй таблицы:
    - users
    - subjects
@@ -815,12 +815,12 @@ Acceptance criteria:
 4. Проверь качество ответов:
    - 50 тестовых вопросов;
    - классифицируй проблемы: слишком длинно, неточно, слишком осторожно, не спросил уточнения, плохо форматирует.
-5. Создай `BETA_TEST_GUIDE.md`:
+5. Создай `docs/beta/BETA_TEST_GUIDE.md`:
    - как пользоваться;
    - какие команды есть;
    - что нельзя воспринимать как назначение лечения;
    - как сообщать об ошибках.
-6. Создай `KNOWN_LIMITATIONS.md`.
+6. Создай `docs/beta/KNOWN_LIMITATIONS.md`.
 
 Acceptance criteria:
 - Есть beta guide.
@@ -856,4 +856,3 @@ Acceptance criteria:
 14. Блок 14: beta polish.
 
 Блоки 9, 10 и 12 можно менять местами после MVP-1. Если пользователь активно пользуется Telegram и не загружает материалы, раньше делать карточки, память и деплой. Если главная боль - точность по источникам, раньше делать Evidence mode и документы.
-

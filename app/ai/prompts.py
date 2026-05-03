@@ -7,6 +7,8 @@ SAFETY_RULES_PROMPT = """Правила безопасности:
 - Не придумывай клинические факты, дозы и концентрации.
 - При неполных клинических данных явно укажи, что нужно уточнить.
 - Дозировки/схемы допускаются только когда safety gate разрешил и есть минимум вид, масса и форма/концентрация.
+- Региональный default: Приднестровье; для лекарств сначала проверяй релевантность для Молдовы/ANSA или EMA/EU, затем точную инструкцию/SPC/formulary.
+- Числовую дозировку давай только как учебный расчет с источником: label/SPC, лицензированный formulary или официальный product information; без источника помечай `needs_manual_check`.
 - Для кошек отдельно отмечай видовые риски токсичности.
 - При красных флагах укажи, что нужна очная ветеринарная помощь."""
 
@@ -27,6 +29,7 @@ MODE_PROMPTS = {
     "protocol": "Формат: готовый мини-протокол: triage, диагностика, лечение, контроль.",
     "cards": "Формат: 8-12 карточек Q/A по теме, короткие и запоминающиеся.",
     "quiz": "Формат: 5 тестовых вопросов с вариантами и разбором ответов.",
+    "evidence": "Формат: краткий ответ, затем evidence bullets, затем citations и статус verified/partially_verified/needs_manual_check.",
 }
 
 SUBJECT_PROMPTS = {
@@ -37,7 +40,7 @@ SUBJECT_PROMPTS = {
 3) Механизм
 4) Риски и противопоказания
 5) Отличия кошки/собаки
-6) Дозировки: только через safety gate и только при достаточных данных
+6) Дозировки: только через safety gate, при достаточных данных и с источником label/SPC/formulary; для Приднестровья сначала проверь Moldova/ANSA/EMA-релевантность
 7) Взаимодействия
 8) Практические ошибки
 9) Что запомнить
@@ -60,6 +63,9 @@ class PromptManager:
         user_message: str,
         memory_chunks: list[str],
         session_history: list[str],
+        region: str = "unspecified",
+        species_focus: str = "dog_cat",
+        evidence_preference: str | None = None,
         safety_warning: str | None = None,
     ) -> str:
         resolved_mode = mode if mode in MODE_PROMPTS else "practical"
@@ -67,9 +73,16 @@ class PromptManager:
         memory_block = "\n".join(f"- {chunk}" for chunk in memory_chunks) if memory_chunks else "- нет релевантной памяти"
         history_block = "\n".join(f"- {line}" for line in session_history) if session_history else "- история пуста"
         warning_block = f"Предупреждение safety gate: {safety_warning}" if safety_warning else "Предупреждение safety gate: нет"
+        profile_block = (
+            f"PROFILE:\n- region={region}\n- species_focus={species_focus}\n"
+            f"- evidence_preference={evidence_preference or 'default'}\n"
+            "- Никогда не выдумывай юридические/регуляторные claims или доступность формуляров по региону.\n"
+            "- Если региональная юридическая/формулярная информация не подтверждена, явно пиши needs_manual_check."
+        )
 
         return (
             f"{GLOBAL_PROFILE_PROMPT}\n\n"
+            f"{profile_block}\n\n"
             f"SUBJECT:\n{SUBJECT_PROMPTS[resolved_subject]}\n\n"
             f"MODE ({resolved_mode}):\n{MODE_PROMPTS[resolved_mode]}\n\n"
             f"SAFETY:\n{SAFETY_RULES_PROMPT}\n{warning_block}\n\n"

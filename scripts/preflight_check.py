@@ -23,6 +23,15 @@ def _warn(label: str) -> tuple[str, str]:
     return "warn", label
 
 
+def _secret_ready(value: str, *, min_len: int = 16) -> bool:
+    normalized = (value or "").strip().lower()
+    if len(normalized) < min_len:
+        return False
+    if normalized in {"change-me", "vetstudy-owner", "vetstudy-local-token"}:
+        return False
+    return not any(marker in normalized for marker in ("replace-with", "example", "placeholder", "long-random"))
+
+
 def check_env() -> list[tuple[str, str]]:
     settings = get_settings()
     rows: list[tuple[str, str]] = []
@@ -30,11 +39,15 @@ def check_env() -> list[tuple[str, str]]:
     rows.append(_ok("DEBUG=false") if settings.debug is False else _fail("DEBUG must be false for beta/prod"))
     rows.append(_ok("TELEGRAM_BOT_TOKEN is set") if bool(settings.telegram_bot_token) else _fail("TELEGRAM_BOT_TOKEN is missing"))
     rows.append(_ok("DATABASE_URL is set") if bool(settings.database_url) else _fail("DATABASE_URL is missing"))
-    rows.append(_ok("USER_ID_HASH_SALT is set") if bool(settings.user_id_hash_salt) else _fail("USER_ID_HASH_SALT is missing"))
-    rows.append(_ok("ALLOWED_TELEGRAM_USER_IDS has entries") if settings.allowed_user_ids else _fail("ALLOWED_TELEGRAM_USER_IDS is empty"))
+    rows.append(_ok("USER_ID_HASH_SALT is non-default") if _secret_ready(settings.user_id_hash_salt) else _fail("USER_ID_HASH_SALT is missing/default"))
+    allowlist_present = bool(settings.allowed_user_ids or settings.allowed_usernames)
+    rows.append(_ok("Telegram allowlist has entries") if allowlist_present else _fail("Telegram allowlist is empty"))
     rows.append(_ok("WEB_OWNER_TELEGRAM_ID is set") if settings.web_owner_telegram_id else _warn("WEB_OWNER_TELEGRAM_ID not set; web falls back to first allowlist id"))
-    rows.append(_ok("WEB_OWNER_PASSWORD is non-default") if settings.web_owner_password not in {"", "vetstudy-owner", "change-me"} else _fail("WEB_OWNER_PASSWORD is default/missing"))
-    rows.append(_ok("WEB_OWNER_TOKEN is non-default") if settings.web_owner_token not in {"", "vetstudy-local-token", "change-me-long-random-token"} else _fail("WEB_OWNER_TOKEN is default/missing"))
+    password_ready = bool(settings.web_owner_password_hash) or _secret_ready(settings.web_owner_password, min_len=12)
+    rows.append(_ok("WEB_OWNER_PASSWORD_HASH/password is configured") if password_ready else _fail("WEB_OWNER_PASSWORD_HASH/password is default/missing"))
+    rows.append(_warn("WEB_OWNER_PASSWORD_HASH is preferred over plain password") if not settings.web_owner_password_hash else _ok("WEB_OWNER_PASSWORD_HASH is set"))
+    rows.append(_ok("WEB_OWNER_TOKEN is non-default") if _secret_ready(settings.web_owner_token) else _fail("WEB_OWNER_TOKEN is default/missing"))
+    rows.append(_ok("WEB_SESSION_SECRET is non-default") if _secret_ready(settings.web_session_secret) else _fail("WEB_SESSION_SECRET is default/missing"))
 
     provider_keys = {
         "openai": settings.openai_api_key,

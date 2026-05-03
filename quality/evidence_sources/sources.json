@@ -1,0 +1,95 @@
+{
+  "policy_version": "2026-05-03-transnistria-private-beta",
+  "default_region": "Transnistria",
+  "regional_reference": "Treat Transnistria as Moldova-first for registered veterinary medicines, then verify exact local product availability and packaging before any real-world use.",
+  "sources": [
+    {
+      "source_id": "md-ansa-vet-register",
+      "title": "ANSA Moldova State Register of Veterinary Medicinal Products",
+      "url": "https://registru.ansa.gov.md/ro/registru",
+      "region": "Moldova/Transnistria",
+      "species": "multi",
+      "category": "availability_registry",
+      "trust_level": 5,
+      "license_status": "public official registry; metadata only",
+      "dosage_use": "Use to verify registration status, target species, active substance, release mode, withdrawal period, and Moldova market relevance. Do not treat it as a dosing formulary unless the product page contains official administration details."
+    },
+    {
+      "source_id": "eu-upd-veterinary",
+      "title": "EU Veterinary Medicines Information / Union Product Database",
+      "url": "https://medicines.health.europa.eu/veterinary/",
+      "region": "EU/EEA",
+      "species": "multi",
+      "category": "product_label_or_spc",
+      "trust_level": 5,
+      "license_status": "public official product information",
+      "dosage_use": "Use product information/SPC for route, dosage, contraindications, interactions, withdrawal periods, and product availability when the exact product is EU/EMA-authorised or cross-registered."
+    },
+    {
+      "source_id": "ema-veterinary-epar",
+      "title": "EMA Veterinary EPAR/Product Information",
+      "url": "https://www.ema.europa.eu/en/medicines/veterinary",
+      "region": "EU",
+      "species": "multi",
+      "category": "product_label_or_spc",
+      "trust_level": 5,
+      "license_status": "public official product information",
+      "dosage_use": "Use when a Moldova/ANSA item references EMA or when the exact product is centrally authorised."
+    },
+    {
+      "source_id": "plumbs-veterinary-drugs",
+      "title": "Plumb's Veterinary Drugs",
+      "url": "https://plumbs.com/",
+      "region": "Global/US-oriented",
+      "species": "multi",
+      "category": "licensed_formulary",
+      "trust_level": 5,
+      "license_status": "subscription required; do not ingest without project-owner license",
+      "dosage_use": "Preferred practical formulary for small-animal dosing once licensed. Store only user-owned notes/excerpts permitted by the license."
+    },
+    {
+      "source_id": "bsava-small-animal-formulary",
+      "title": "BSAVA Small Animal Formulary",
+      "url": "https://www.bsava.com/formulary/",
+      "region": "UK/EU-oriented",
+      "species": "dog/cat/exotics",
+      "category": "licensed_formulary",
+      "trust_level": 5,
+      "license_status": "subscription or purchase required; do not ingest without project-owner license",
+      "dosage_use": "Preferred dog/cat and exotics formulary once licensed, especially for study use and cross-checking."
+    },
+    {
+      "source_id": "msd-merck-vet-manual",
+      "title": "MSD/Merck Veterinary Manual",
+      "url": "https://www.merckvetmanual.com/",
+      "region": "Global/US-oriented",
+      "species": "multi",
+      "category": "public_manual",
+      "trust_level": 4,
+      "license_status": "public manual; respect terms and avoid bulk copying",
+      "dosage_use": "Use for disease background, pharmacology context, toxicology and clinical reasoning. Do not use as the sole source for product-specific dosing when an official label/SPC is required."
+    },
+    {
+      "source_id": "esccap-guidelines",
+      "title": "ESCCAP Guidelines",
+      "url": "https://www.esccap.org/guidelines/",
+      "region": "Europe",
+      "species": "dog/cat",
+      "category": "guideline",
+      "trust_level": 4,
+      "license_status": "public guidelines; cite and avoid wholesale copying",
+      "dosage_use": "Use for parasite prevention/treatment strategy and regional risk framing; verify exact product and dose by label/formulary."
+    },
+    {
+      "source_id": "wsava-global-guidelines",
+      "title": "WSAVA Global Guidelines",
+      "url": "https://wsava.org/global-guidelines/",
+      "region": "Global",
+      "species": "dog/cat",
+      "category": "guideline",
+      "trust_level": 4,
+      "license_status": "public guidelines; cite and avoid wholesale copying",
+      "dosage_use": "Use for broad clinical guidance, vaccination/nutrition/pain context where relevant; verify exact drug dose elsewhere."
+    }
+  ]
+}

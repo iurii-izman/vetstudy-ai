@@ -13,7 +13,9 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from app.config import get_settings
 
-from app.db.repositories import DocumentChunkRepo, DocumentRepo, ErrorEventRepo, FlashcardRepo, MemoryRepo, MessageRepo, SessionRepo, SubjectRepo, TopicRepo, UserRepo
+from app.analytics import ProductAnalyticsService
+from app.db.models import Flashcard
+from app.db.repositories import DocumentChunkRepo, DocumentRepo, ErrorEventRepo, FeedbackEventRepo, FlashcardRepo, MemoryRepo, MessageRepo, ReviewEventRepo, SessionRepo, SubjectRepo, TopicRepo, UserRepo
 from app.db.services import ChatDBService
 from app.db.session import new_session
 from app.learning.service import LearningService
@@ -22,6 +24,7 @@ from app.media.jobs import DocumentIndexJob, enqueue_document_index
 from app.media.storage import download_telegram_file
 from app.media.types import FileTooLargeError, UnsupportedMediaError
 from app.memory.service import MemoryService
+from app.evidence import EvidenceService
 from app.quotas import QuotaGuard
 from sqlalchemy.exc import SQLAlchemyError
 from app.services import llm_router, prompt_manager, safety_gate
@@ -30,7 +33,9 @@ from app.telegram.formatting import TELEGRAM_HTML_PARSE_MODE, format_ai_answer_f
 router = Router()
 logger = logging.getLogger("app.telegram.handlers")
 
-MODES = {"short", "practical", "deep", "exam", "protocol", "cards", "quiz"}
+MODES = {"short", "practical", "deep", "exam", "protocol", "cards", "quiz", "evidence"}
+REGION_VALUES = {"us", "eu", "local", "unspecified"}
+SPECIES_VALUES = {"dog", "cat", "dog_cat"}
 DEFAULT_SUBJECTS = [
     ("pharmacology", "Фармакология", "Фокус на препаратах, дозах, противопоказаниях и рисках."),
     ("surgery", "Хирургия", "Фокус на хирургической тактике и послеоперационном ведении."),
@@ -203,26 +208,39 @@ def _check_allow(message: Message) -> bool:
     from app.config import get_settings
 
     settings = get_settings()
-    if not settings.allowed_user_ids:
+    allowed_ids = settings.allowed_user_ids
+    allowed_usernames = getattr(settings, "allowed_usernames", set())
+    if not allowed_ids and not allowed_usernames:
         return True
     user = message.from_user
-    return bool(user and user.id in settings.allowed_user_ids)
+    if not user:
+        return False
+    if user.id in allowed_ids:
+        return True
+    username = (getattr(user, "username", "") or "").lstrip("@").lower()
+    return bool(username and username in allowed_usernames)
 
 
 async def _deny_if_not_allowed(message: Message) -> bool:
     if _check_allow(message):
         return False
-    await message.answer("Доступ запрещен. Ваш Telegram ID не в allowlist.")
+    user_id = getattr(getattr(message, "from_user", None), "id", "unknown")
+    await message.answer(f"Доступ запрещен. Ваш Telegram ID: {user_id}. Передайте его владельцу beta для allowlist.")
     return True
 
 
 async def _deny_callback_if_not_allowed(query: CallbackQuery) -> bool:
     settings = get_settings()
-    if not settings.allowed_user_ids or query.from_user.id in settings.allowed_user_ids:
+    allowed_ids = settings.allowed_user_ids
+    allowed_usernames = getattr(settings, "allowed_usernames", set())
+    username = (getattr(query.from_user, "username", "") or "").lstrip("@").lower()
+    if not allowed_ids and not allowed_usernames:
+        return False
+    if query.from_user.id in allowed_ids or (username and username in allowed_usernames):
         return False
     await query.answer("Доступ запрещен.", show_alert=True)
     if query.message:
-        await query.message.answer("Доступ запрещен. Ваш Telegram ID не в allowlist.")
+        await query.message.answer(f"Доступ запрещен. Ваш Telegram ID: {query.from_user.id}. Передайте его владельцу beta для allowlist.")
     return True
 
 
@@ -250,6 +268,7 @@ def _build_ai_reply_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⚡ Кратко", callback_data=_callback_data("short")), InlineKeyboardButton(text="🔎 Глубже", callback_data=_callback_data("deeper"))],
         [InlineKeyboardButton(text="🧠 Карточки", callback_data=_callback_data("cards")), InlineKeyboardButton(text="🧪 Тест", callback_data=_callback_data("test"))],
         [InlineKeyboardButton(text="🧭 Связанные темы", callback_data=_callback_data("related"))],
+        [InlineKeyboardButton(text="👍", callback_data=_callback_data("fb_up")), InlineKeyboardButton(text="👎", callback_data=_callback_data("fb_down")), InlineKeyboardButton(text="ошибка", callback_data=_callback_data("fb_error"))],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -258,10 +277,11 @@ def _build_review_keyboard(card_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Знал", callback_data=_callback_data("review_known", card_id)),
-                InlineKeyboardButton(text="❌ Не знал", callback_data=_callback_data("review_unknown", card_id)),
+                InlineKeyboardButton(text="😵 Again", callback_data=_callback_data("review_again", card_id)),
+                InlineKeyboardButton(text="😬 Hard", callback_data=_callback_data("review_hard", card_id)),
             ],
-            [InlineKeyboardButton(text="⏳ Повторить позже", callback_data=_callback_data("review_later", card_id))],
+            [InlineKeyboardButton(text="🙂 Good", callback_data=_callback_data("review_good", card_id)), InlineKeyboardButton(text="😎 Easy", callback_data=_callback_data("review_easy", card_id))],
+            [InlineKeyboardButton(text="👁 Показать ответ", callback_data=_callback_data("review_reveal", card_id))],
         ]
     )
 
@@ -306,9 +326,30 @@ def parse_callback_data(data: str) -> ActionCallback | None:
 def _topic_required_text(thread_id: int | None) -> str:
     return (
         f"Текущий thread id: {thread_id}\n"
-        "Этот Telegram topic не привязан к предмету в БД.\n"
-        "Используйте: /bind_topic <slug_or_name>"
+        "Этот Telegram topic пока не привязан к учебной теме.\n"
+        "Используйте: /bind_topic <slug_or_name>\n"
+        "Быстрый старт: /create_default_topics"
     )
+
+
+def _provider_error_text() -> str:
+    return "LLM-провайдер временно недоступен. Проверьте ключи/лимиты и повторите позже."
+
+
+def _quota_error_text() -> str:
+    return "Лимит запросов или бюджета исчерпан. Попробуйте позже."
+
+
+def _user_profile(user) -> dict:
+    settings = dict(user.settings or {})
+    profile = dict(settings.get("profile") or {})
+    region = str(profile.get("region", "unspecified")).lower()
+    species_focus = str(profile.get("species_focus", "dog_cat")).lower()
+    if region not in REGION_VALUES:
+        region = "unspecified"
+    if species_focus not in SPECIES_VALUES:
+        species_focus = "dog_cat"
+    return {"region": region, "species_focus": species_focus}
 
 
 async def _send_typing(message: Message) -> None:
@@ -353,8 +394,18 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             return
         chat_db = ChatDBService(db)
         preferred_mode = (user.settings or {}).get("mode", "practical")
+        evidence = EvidenceService()
         session = chat_db.get_or_create_active_session(user.id, topic.id, mode=preferred_mode)
+        profile = _user_profile(user)
+        analytics = ProductAnalyticsService(db)
         chat_db.save_user_message(session.id, text, message.message_id)
+        analytics.track(
+            user_id=user.id,
+            topic_id=topic.id,
+            session_id=session.id,
+            event_name="activation_first_question",
+            properties={"topic_title": getattr(topic, "title", "unknown"), "mode": session.mode},
+        )
         safety = safety_gate.check(text)
         if not safety.allowed:
             warn = safety.warning or "Недостаточно данных."
@@ -370,32 +421,100 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
         ]
         subject = SubjectRepo(db).get_by_id(topic.subject_id)
         history_rows = MessageRepo(db).recent_for_session(session.id, limit=6)
+        high_risk = evidence.is_high_risk(text, getattr(safety, "risk_tags", []))
+        if high_risk:
+            analytics.track(
+                user_id=user.id,
+                topic_id=topic.id,
+                session_id=session.id,
+                event_name="high_risk_query",
+                properties={"risk_tags": getattr(safety, "risk_tags", [])},
+            )
+        effective_mode = "evidence" if (session.mode == "evidence" or high_risk) else session.mode
+        preferred_sources = evidence.preferred_sources(region=profile["region"], species_focus=profile["species_focus"])
         prompt = prompt_manager.build(
-            mode=session.mode,
+            mode=effective_mode,
             subject=subject.slug if subject else "general",
             user_message=text,
             memory_chunks=memory_chunks,
             session_history=[f"{row.role}: {row.content[:200]}" for row in history_rows],
+            region=profile["region"],
+            species_focus=profile["species_focus"],
+            evidence_preference=", ".join(preferred_sources) if preferred_sources else None,
             safety_warning=safety.warning,
         )
         prompt += "\n\nEVIDENCE_POLICY:\n- Используй только факты, подтверждённые блоком RETRIEVED_MEMORY.\n- Не делай уверенных утверждений, если в памяти нет подтверждения.\n- Для каждого клинического тезиса добавляй ссылку вида [doc/chunk]."
         answer = await llm_router.generate(db, user.id, prompt, purpose="answer")
-        assistant_msg = chat_db.save_assistant_message(session.id, answer, metadata={**(metadata or {}), "topic_id": str(topic.id)})
-        await _send_ai_answer(message, answer)
+        rendered_answer = answer
+        evidence_payload = None
+        if effective_mode == "evidence":
+            evidence_resp = evidence.build_response(query=text, llm_answer=answer, retrieved=search_results, high_risk=high_risk)
+            rendered_answer = evidence.render_markdown(evidence_resp)
+            evidence_payload = {
+                "status": evidence_resp.status,
+                "citations": evidence_resp.citations,
+                "needs_manual_check": evidence_resp.needs_manual_check,
+            }
+        assistant_msg = chat_db.save_assistant_message(
+            session.id,
+            rendered_answer,
+            metadata={
+                **(metadata or {}),
+                "topic_id": str(topic.id),
+                "effective_mode": effective_mode,
+                "high_risk": high_risk,
+                "evidence": evidence_payload,
+            },
+        )
+        analytics.track(
+            user_id=user.id,
+            topic_id=topic.id,
+            session_id=session.id,
+            event_name="activation_first_answer",
+            properties={"effective_mode": effective_mode, "high_risk": high_risk},
+        )
+        await _send_ai_answer(message, rendered_answer)
         await _try_ingest_answer(
             memory,
             db=db,
             user_id=user.id,
             topic_id=topic.id,
             source_message_id=assistant_msg.id,
-            answer=answer,
+            answer=rendered_answer,
             title="Ответ",
             kind="answer",
         )
     except SQLAlchemyError:
+        ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "db"})
+        ErrorEventRepo(db).add(
+            user_id=user.id,
+            scope="telegram",
+            category="telegram_pipeline_db_error",
+            details={"topic_id": str(topic.id), "message_id": message.message_id},
+        )
         logger.exception("db_error_in_pipeline", extra={"event": "telegram_pipeline_error", "error_category": "db_error"})
         await message.answer("Ошибка базы данных. Попробуйте чуть позже.")
-    except Exception:
+    except RuntimeError:
+        ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "provider"})
+        ErrorEventRepo(db).add(
+            user_id=user.id,
+            scope="telegram",
+            category="telegram_pipeline_provider_error",
+            details={"topic_id": str(topic.id), "message_id": message.message_id},
+        )
+        logger.exception("provider_runtime_error", extra={"event": "telegram_pipeline_error", "error_category": "provider_error"})
+        await message.answer(_provider_error_text())
+    except Exception as exc:
+        if "quota" in str(exc).lower() or "429" in str(exc):
+            await message.answer(_quota_error_text())
+            return
+        ErrorEventRepo(db).add(
+            user_id=user.id,
+            scope="telegram",
+            category="telegram_pipeline_unexpected_error",
+            details={"topic_id": str(topic.id), "message_id": message.message_id, "error": str(exc)},
+        )
+        ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "unexpected"})
         logger.exception("pipeline_failed", extra={"event": "telegram_pipeline_error", "error_category": "telegram_error"})
         await message.answer("Временная ошибка обработки. Попробуйте ещё раз.")
     finally:
@@ -406,7 +525,24 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
 async def cmd_start(message: Message):
     if await _deny_if_not_allowed(message):
         return
-    await message.answer("VetStudy AI готов. Используйте /help.")
+    db = new_session()
+    try:
+        try:
+            user = UserRepo(db).get_or_create(message.from_user.id, message.from_user.full_name if message.from_user else None)
+            ProductAnalyticsService(db).track(user_id=user.id, event_name="activation_start")
+        except Exception:
+            logger.debug("activation_start_track_failed", exc_info=True)
+    finally:
+        db.close()
+    await message.answer(
+        "VetStudy AI готов.\n"
+        "Next steps:\n"
+        "1) /create_default_topics\n"
+        "2) или /bind_topic <slug_or_name>\n"
+        "3) задайте вопрос в topic\n"
+        "4) учёба: /cards -> /review -> /quiz\n"
+        "Подсказки: /help",
+    )
 
 
 @router.message(Command("help"))
@@ -414,8 +550,48 @@ async def cmd_help(message: Message):
     if await _deny_if_not_allowed(message):
         return
     await message.answer(
-        "/start\n/help\n/status\n/topics\n/bind_topic <slug_or_name>\n/create_default_topics\n/new\n/mode\n/summary\n/search\n/save\n/cards\n/quiz\n/review\n/docs\n/export",
+        "Онбординг:\n/start\n/status\n/topics\n/create_default_topics\n/bind_topic <slug_or_name>\n\n"
+        "Сессия:\n/new\n/mode\n/evidence\n/save\n/search\n/summary\n/profile\n\n"
+        "Обучение:\n/cards\n/review\n/quiz\n/export\n\n"
+        "Система:\n/docs\n/help",
     )
+
+
+@router.message(Command("profile"))
+async def cmd_profile(message: Message, command: CommandObject):
+    if await _deny_if_not_allowed(message):
+        return
+    raw = (command.args or "").strip().lower()
+    db = new_session()
+    try:
+        user = UserRepo(db).get_or_create(message.from_user.id, message.from_user.full_name if message.from_user else None)
+        current = _user_profile(user)
+        if not raw:
+            await message.answer(
+                "Профиль:\n"
+                f"- region: {current['region']}\n"
+                f"- species_focus: {current['species_focus']}\n\n"
+                "Изменить: /profile region=<us|eu|local|unspecified> species=<dog|cat|dog_cat>"
+            )
+            return
+        updates = dict(current)
+        for part in raw.split():
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            value = value.strip().lower()
+            if key == "region" and value in REGION_VALUES:
+                updates["region"] = value
+            if key == "species" and value in SPECIES_VALUES:
+                updates["species_focus"] = value
+        settings = dict(user.settings or {})
+        settings["profile"] = updates
+        user.settings = settings
+        db.commit()
+        ProductAnalyticsService(db).track(user_id=user.id, event_name="profile_updated", properties=updates)
+        await message.answer(f"Профиль обновлен: region={updates['region']}, species_focus={updates['species_focus']}")
+    finally:
+        db.close()
 
 
 @router.message(Command("status"))
@@ -516,6 +692,7 @@ async def cmd_bind_topic(message: Message, command: CommandObject):
         return
     db = new_session()
     try:
+        user = UserRepo(db).get_or_create(message.from_user.id, message.from_user.full_name if message.from_user else None)
         subject = SubjectRepo(db).get_by_slug_or_title(value)
         if not subject:
             await message.answer(
@@ -523,6 +700,12 @@ async def cmd_bind_topic(message: Message, command: CommandObject):
             )
             return
         topic = TopicRepo(db).bind_subject(chat_id=message.chat.id, thread_id=message.message_thread_id, subject=subject)
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            topic_id=topic.id,
+            event_name="activation_topic_bound",
+            properties={"subject": subject.slug},
+        )
         await message.answer(
             f"Привязано: '{topic.title}' (slug={subject.slug}) к thread id {message.message_thread_id}.",
         )
@@ -553,6 +736,7 @@ async def cmd_create_default_topics(message: Message):
 
     db = new_session()
     try:
+        user = UserRepo(db).get_or_create(message.from_user.id, message.from_user.full_name if message.from_user else None)
         subject_repo = SubjectRepo(db)
         topic_repo = TopicRepo(db)
         created = []
@@ -562,7 +746,13 @@ async def cmd_create_default_topics(message: Message):
             if existing:
                 continue
             forum_topic = await message.bot.create_forum_topic(chat_id=message.chat.id, name=title)
-            topic_repo.bind_subject(chat_id=message.chat.id, thread_id=forum_topic.message_thread_id, subject=subject)
+            topic = topic_repo.bind_subject(chat_id=message.chat.id, thread_id=forum_topic.message_thread_id, subject=subject)
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                topic_id=topic.id,
+                event_name="activation_topic_bound",
+                properties={"subject": subject.slug, "created_default": True},
+            )
             created.append(f"{title} (thread={forum_topic.message_thread_id})")
         if created:
             await message.answer("Созданы темы:\n" + "\n".join(f"- {x}" for x in created))
@@ -585,6 +775,7 @@ async def cmd_new(message: Message):
             await message.answer(_topic_required_text(message.message_thread_id))
             return
         session = SessionRepo(db).new_active(user.id, topic.id)
+        ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, session_id=session.id, event_name="session_new")
         await message.answer(f"Новая сессия создана: {session.id}")
     finally:
         db.close()
@@ -596,10 +787,10 @@ async def cmd_mode(message: Message, command: CommandObject):
         return
     mode = (command.args or "").strip()
     if not mode:
-        await message.answer("Режимы: short|practical|deep|exam|protocol|cards|quiz")
+        await message.answer("Режимы: short|practical|deep|exam|protocol|cards|quiz|evidence")
         return
     if mode not in MODES:
-        await message.answer("Использование: /mode short|practical|deep|exam|protocol|cards|quiz")
+        await message.answer("Использование: /mode short|practical|deep|exam|protocol|cards|quiz|evidence")
         return
     db = new_session()
     try:
@@ -617,6 +808,11 @@ async def cmd_mode(message: Message, command: CommandObject):
         await message.answer(f"Режим переключен: {mode}")
     finally:
         db.close()
+
+
+@router.message(Command("evidence"))
+async def cmd_evidence(message: Message):
+    await cmd_mode(message, CommandObject(command="/mode", args="evidence"))
 
 
 @router.message(Command("summary"))
@@ -670,6 +866,12 @@ async def cmd_search(message: Message, command: CommandObject):
             current_topic_id=topic.id,
             top_k=5,
             cross_topic=True,
+        )
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            topic_id=topic.id,
+            event_name="search_performed",
+            properties={"query": query[:120], "results": len(results), "topic_title": topic.title},
         )
         if not results:
             text = "Ничего не найдено."
@@ -769,15 +971,40 @@ async def cmd_cards(message: Message, command: CommandObject):
             await message.answer("Нет данных для генерации карточек.")
             return
         learning = LearningService()
-        cards = learning.generate_cards(
-            text=text,
-            topic_id=topic.id,
-            source_message_id=source_message_id,
-            tags=sorted(set(tags)),
+        payload_cards = await learning.generate_cards_structured(
+            llm_router=llm_router,
+            db=db,
             user_id=user.id,
+            text=text,
             count=6,
+            tags=sorted(set(tags)),
+            source_message_id=str(source_message_id) if source_message_id else None,
         )
+        cards = [
+            Flashcard(
+                user_id=user.id,
+                topic_id=topic.id,
+                source_message_id=source_message_id,
+                front=item["front"],
+                back=item["back"],
+                tags=sorted(set([*item.get("tags", []), f"difficulty:{item.get('difficulty', 'medium')}"])),
+                due_at=datetime.now(UTC),
+                ease=2.5,
+                interval_days=1,
+            )
+            for item in payload_cards
+        ]
+        if not cards:
+            await message.answer("Не удалось собрать валидные карточки из ответа модели.")
+            return
         FlashcardRepo(db).add_many(cards)
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            topic_id=topic.id,
+            event_name="cards_created",
+            properties={"count": len(cards), "source": source or "answer"},
+        )
+        ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="activation_first_cards")
         preview = "\n\n".join(f"Q: {c.front}\nA: {c.back}" for c in cards[:5])
         await message.answer(f"Сгенерировано карточек: {len(cards)}\n\n{preview}")
     finally:
@@ -804,7 +1031,7 @@ async def cmd_quiz(message: Message):
         if not last:
             await message.answer("Нет ответа для генерации quiz.")
             return
-        items = LearningService().generate_quiz(text=last.content, count=7)
+        items = await LearningService().generate_quiz_structured(llm_router=llm_router, db=db, user_id=user.id, text=last.content, count=7)
         lines = ["Тест:"]
         for item in items:
             lines.append(item.question)
@@ -835,7 +1062,7 @@ async def cmd_review(message: Message):
             return
         card = due_cards[0]
         await message.answer(
-            f"Карточка:\n{card.front}\n\nОтвет:\n{card.back}",
+            f"Карточка:\n{card.front}\n\nОтвет скрыт. Нажмите «Показать ответ».",
             reply_markup=_build_review_keyboard(str(card.id)),
         )
     finally:
@@ -911,7 +1138,7 @@ async def on_ai_action(query: CallbackQuery):
         if query.message:
             await query.message.answer("Результат поиска выбран для /cards search.")
         return
-    if parsed.action in {"review_known", "review_unknown", "review_later"}:
+    if parsed.action in {"review_again", "review_hard", "review_good", "review_easy", "review_reveal"}:
         db = new_session()
         try:
             chat_db = ChatDBService(db)
@@ -924,13 +1151,61 @@ async def on_ai_action(query: CallbackQuery):
                 if query.message:
                     await query.message.answer("Карточка не найдена или недоступна.")
                 return
-            action = {"review_known": "known", "review_unknown": "unknown", "review_later": "later"}[parsed.action]
-            updated = LearningService().apply_review(card=card, action=action)
-            FlashcardRepo(db).save(updated)
+            if parsed.action == "review_reveal":
+                ReviewEventRepo(db).add(user_id=user.id, topic_id=card.topic_id, flashcard_id=card.id, event_type="reveal", score=None, metadata_={})
+                ProductAnalyticsService(db).track(user_id=user.id, topic_id=card.topic_id, event_name="cards_review_reveal")
+                if query.message:
+                    await query.message.answer(f"Ответ:\n{card.back}", reply_markup=_build_review_keyboard(str(card.id)))
+                return
+            action = {"review_again": "again", "review_hard": "hard", "review_good": "good", "review_easy": "easy"}[parsed.action]
+            updated, score = LearningService().apply_review(card=card, action=action)
+            updated = FlashcardRepo(db).save(updated)
+            ReviewEventRepo(db).add(user_id=user.id, topic_id=card.topic_id, flashcard_id=card.id, event_type=action, score=score, metadata_={"due_at": updated.due_at.isoformat() if updated.due_at else None})
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                topic_id=card.topic_id,
+                event_name="cards_reviewed",
+                properties={"action": action, "score": score},
+            )
+            ProductAnalyticsService(db).track(user_id=user.id, topic_id=card.topic_id, event_name="activation_first_review")
             if query.message:
                 await query.message.answer(
                     f"Ок. Следующий повтор: {updated.due_at.date().isoformat()} (interval={updated.interval_days}, ease={float(updated.ease):.2f})",
                 )
+        finally:
+            db.close()
+        return
+    if parsed.action in {"fb_up", "fb_down", "fb_error"}:
+        if not query.message:
+            return
+        db = new_session()
+        try:
+            chat_db = ChatDBService(db)
+            user = chat_db.ensure_user(query.from_user.id, query.from_user.full_name if query.from_user else None)
+            topic = chat_db.get_topic_for_chat_thread(query.message.chat.id, query.message.message_thread_id)
+            session = SessionRepo(db).get_active(user.id, topic.id) if topic else None
+            last = MessageRepo(db).last_assistant(session.id) if session else None
+            FeedbackEventRepo(db).add(
+                user_id=user.id,
+                topic_id=(topic.id if topic else None),
+                message_id=(last.id if last else None),
+                source_message_id=(last.id if last else None),
+                model=((last.metadata_ or {}).get("model") if last else None),
+                feedback_type={"fb_up": "up", "fb_down": "down", "fb_error": "error"}[parsed.action],
+                details=None,
+                status="new",
+                metadata_={
+                    "provider": (last.metadata_ or {}).get("provider") if last else None,
+                    "mode": (last.metadata_ or {}).get("effective_mode") if last else None,
+                },
+            )
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                topic_id=(topic.id if topic else None),
+                event_name="feedback_submitted",
+                properties={"type": {"fb_up": "up", "fb_down": "down", "fb_error": "error"}[parsed.action]},
+            )
+            await query.message.answer("Спасибо, feedback сохранен.")
         finally:
             db.close()
         return
@@ -963,20 +1238,31 @@ async def on_ai_action(query: CallbackQuery):
                 return
 
             if parsed.action == "cards":
-                cards = LearningService().generate_cards(
-                    text=last.content,
-                    topic_id=topic.id,
-                    source_message_id=last.id,
-                    tags=["cards", "answer"],
+                raw_cards = await LearningService().generate_cards_structured(
+                    llm_router=llm_router,
+                    db=db,
                     user_id=user.id,
+                    text=last.content,
                     count=6,
+                    tags=["cards", "answer"],
+                    source_message_id=str(last.id),
                 )
+                cards = [Flashcard(user_id=user.id, topic_id=topic.id, source_message_id=last.id, front=x["front"], back=x["back"], tags=x["tags"], due_at=datetime.now(UTC), ease=2.5, interval_days=1) for x in raw_cards]
+                if not cards:
+                    await query.message.answer("Не удалось собрать валидные карточки.")
+                    return
                 FlashcardRepo(db).add_many(cards)
+                ProductAnalyticsService(db).track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    event_name="cards_created",
+                    properties={"count": len(cards), "source": "inline"},
+                )
                 await query.message.answer(f"Сгенерировано карточек: {len(cards)}")
                 return
 
             if parsed.action == "test":
-                items = LearningService().generate_quiz(text=last.content, count=5)
+                items = await LearningService().generate_quiz_structured(llm_router=llm_router, db=db, user_id=user.id, text=last.content, count=5)
                 lines = ["Тест:"]
                 for item in items:
                     lines.append(item.question)

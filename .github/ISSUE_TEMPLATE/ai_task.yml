@@ -1,0 +1,43 @@
+name: AI autopilot task
+description: A scoped task ready for an AI coding agent.
+title: "[ai] "
+labels: ["ai:ready"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: One concrete outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Relevant files, docs, issue links, and constraints.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: "- ..."
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Required checks
+      value: |
+        - python -m ruff check .
+        - python -m pytest -q
+        - cd web && npm test && npm run build
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety
+      options:
+        - label: No secrets, private IDs, backups, or generated artifacts are needed.
+          required: true
+        - label: Medical high-risk behavior is unchanged or explicitly tested.
+          required: true

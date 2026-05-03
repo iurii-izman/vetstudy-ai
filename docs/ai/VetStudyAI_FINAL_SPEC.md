@@ -641,7 +641,7 @@ flowchart TD
 Сформулировать следующему AI так:
 
 ```text
-Ты senior Python engineer. Реализуй MVP-1 проекта VetStudy AI по файлу VetStudyAI_FINAL_SPEC.md.
+Ты senior Python engineer. Реализуй MVP-1 проекта VetStudy AI по файлу `docs/ai/VetStudyAI_FINAL_SPEC.md`.
 
 Сначала создай каркас проекта:
 - FastAPI + aiogram 3
@@ -665,4 +665,3 @@ flowchart TD
 
 Не добавляй веб-кабинет, платежи, PDF/OCR и мультипользовательскую админку в первом PR.
 ```
-

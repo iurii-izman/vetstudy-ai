@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security or secret exposure
+    url: https://github.com/iurii-izman/vetstudy-ai/security
+    about: Do not disclose secrets or exploitable details in public issues.

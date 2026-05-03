@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     webhook_path: str = "/telegram/webhook"
     telegram_chat_id: int = 0
     allowed_telegram_user_ids: str = ""
+    allowed_telegram_usernames: str = ""
 
     database_url: str = "postgresql+psycopg://postgres:postgres@db:5432/vetstudy"
     redis_url: str = ""
@@ -70,13 +71,28 @@ class Settings(BaseSettings):
     user_id_hash_salt: str = ""
     web_owner_telegram_id: int = Field(default=0, validation_alias=AliasChoices("WEB_OWNER_TELEGRAM_ID"))
     web_owner_password: str = "vetstudy-owner"
+    web_owner_password_hash: str = ""
     web_owner_token: str = "vetstudy-local-token"
+    web_session_secret: str = "change-me-session-secret"
+    web_session_ttl_seconds: int = 900
+    web_login_rate_limit_count: int = 8
+    web_login_rate_limit_window_seconds: int = 300
+    web_admin_rate_limit_count: int = 120
+    web_admin_rate_limit_window_seconds: int = 60
+    sentry_dsn: str = ""
+    evidence_sources_path: str = "quality/evidence_sources/sources.json"
 
     @property
     def allowed_user_ids(self) -> set[int]:
         if not self.allowed_telegram_user_ids.strip():
             return set()
         return {int(x.strip()) for x in self.allowed_telegram_user_ids.split(",") if x.strip()}
+
+    @property
+    def allowed_usernames(self) -> set[str]:
+        if not self.allowed_telegram_usernames.strip():
+            return set()
+        return {x.strip().lstrip("@").lower() for x in self.allowed_telegram_usernames.split(",") if x.strip()}
 
 
 @lru_cache

@@ -22,12 +22,18 @@
 - Confirm `model_calls` rows are being written for each AI request.
 - Confirm daily/monthly limits and max request tokens are configured.
 - Review logs for `ai_call` structured entries.
+- If `SENTRY_DSN` is enabled, verify one captured test exception in Sentry.
+- Check `/api/web/admin/metrics/providers` and `/api/web/admin/alerts/unanswered`.
 
 5. GitHub release hygiene
-- Open PR with summary of AI/router changes and migration notes.
+- Open PR with summary of AI/router changes and migration notes after the beta baseline is published.
 - Ensure CI is green.
-- Tag release (e.g. `v0.1.0`) after merge.
+- Ensure Dependency Review and CodeQL are enabled for future PRs.
+- Confirm branch protection/ruleset on `main` after first push.
+- Tag beta release (e.g. `v0.1.0-beta.1`) after validation.
 
 6. Post-release checks
 - Verify `/health` endpoint.
 - Send one Telegram test prompt and verify fallback behavior by disabling primary key.
+- Validate session auth flow: `/api/web/auth/session` + `/api/web/auth/refresh`.
+- Follow `docs/beta/RUNBOOK.md` for backup restore drill and rollback rehearsal.

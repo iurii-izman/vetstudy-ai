@@ -6,9 +6,11 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.config import get_settings
-from app.db.models import Base, Document, DocumentChunk, ErrorEvent, Flashcard, MemoryItem, Message, ModelCall, Session, Subject, Topic, User
+from app.db.models import Base, Document, DocumentChunk, ErrorEvent, FeedbackEvent, Flashcard, MemoryItem, Message, ModelCall, ProductEvent, Session, Subject, Topic, User
 from app.db.session import get_db
 from app.main import app
+from app.web.router import SESSION_COOKIE, _rate_limiter
+from app.web.security import hash_password
 
 
 def make_client():
@@ -57,7 +59,10 @@ def make_client():
     call1 = ModelCall(user_id=user1.id, provider='mock', model='m1', purpose='answer', input_tokens=10, output_tokens=20, cost_usd=0.1)
     err1 = ErrorEvent(user_id=user1.id, scope='api', category='test', details={'x': 1})
 
-    db.add_all([note1, note2, card1, card2, call1, err1])
+    feedback = FeedbackEvent(user_id=user1.id, topic_id=topic1.id, message_id=msg1.id, source_message_id=msg1.id, feedback_type="down", status="new", metadata_={})
+    ev1 = ProductEvent(user_id=user1.id, topic_id=topic1.id, session_id=sess1.id, event_name="activation_start", properties={})
+    ev2 = ProductEvent(user_id=user1.id, topic_id=topic1.id, session_id=sess1.id, event_name="high_risk_query", properties={})
+    db.add_all([note1, note2, card1, card2, call1, err1, feedback, ev1, ev2])
     db.flush()
     doc = Document(user_id=user1.id, topic_id=topic1.id, filename="u1.pdf", size_bytes=100, status="indexed", job_id="job-u1", metadata_={})
     db.add(doc)
@@ -101,6 +106,25 @@ def test_web_lists_telegram_global_topics_used_by_user():
 def test_web_requires_bearer_token_for_user_endpoints():
     client, _, _ = make_client()
     res = client.get('/api/web/stats', headers={'X-User-Telegram-Id': '1001'})
+    assert res.status_code == 401
+
+
+def test_session_token_cannot_impersonate_other_user_with_header():
+    client, _, _ = make_client()
+    auth = client.post('/api/web/auth/login', json={'password': get_settings().web_owner_password})
+    assert auth.status_code == 200
+    token = auth.json()["access_token"]
+
+    res = client.get(
+        '/api/web/stats',
+        headers={'Authorization': f'Bearer {token}', 'X-User-Telegram-Id': '1001'},
+    )
+    assert res.status_code == 403
+
+
+def test_malformed_bearer_token_returns_401():
+    client, _, _ = make_client()
+    res = client.get('/api/web/stats', headers={'Authorization': 'Bearer not-a-valid-session-token'})
     assert res.status_code == 401
 
 
@@ -184,7 +208,101 @@ def test_admin_usage_costs_errors_and_users():
     costs = client.get('/api/web/admin/costs', headers=_owner_headers())
     assert costs.status_code == 200
     assert len(costs.json()) >= 1
+    assert "provider" in costs.json()[0]
 
     errors = client.get('/api/web/admin/errors', headers=_owner_headers())
     assert errors.status_code == 200
     assert len(errors.json()) >= 1
+    feedback = client.get('/api/web/admin/feedback', headers=_owner_headers())
+    assert feedback.status_code == 200
+    assert len(feedback.json()) >= 1
+    feedback_id = feedback.json()[0]["id"]
+    updated = client.patch(f"/api/web/admin/feedback/{feedback_id}", headers=_owner_headers(), json={"status": "in_review"})
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "in_review"
+
+
+def test_flashcard_review_endpoint_creates_event():
+    client, topic1_id, _ = make_client()
+    cards = client.get(f'/api/web/flashcards?topic_id={topic1_id}', headers=_user_headers(1001))
+    card_id = cards.json()[0]["id"]
+    review = client.post(f'/api/web/flashcards/{card_id}/review', headers=_user_headers(1001), json={"action": "good"})
+    assert review.status_code == 200
+    assert review.json()["interval_days"] >= 1
+
+
+def test_admin_evidence_endpoints():
+    client, _, _ = make_client()
+    coverage = client.get('/api/web/admin/evidence/source-coverage', headers=_owner_headers())
+    assert coverage.status_code == 200
+    assert "total_sources" in coverage.json()
+
+    needs = client.get('/api/web/admin/evidence/needs-check', headers=_owner_headers())
+    assert needs.status_code == 200
+
+
+def test_search_facets_and_topic_graph():
+    client, topic1_id, _ = make_client()
+    res = client.get(f'/api/web/memory/search?q=note&kind=note&tag=ortho&topic_id={topic1_id}', headers=_user_headers(1001))
+    assert res.status_code == 200
+    assert len(res.json()) == 1
+    graph = client.get('/api/web/topics/graph', headers=_user_headers(1001))
+    assert graph.status_code == 200
+    assert "nodes" in graph.json()
+
+
+def test_web_login_supports_password_hash_and_refresh():
+    client, _, _ = make_client()
+    settings = get_settings()
+    old_hash = settings.web_owner_password_hash
+    try:
+        settings.web_owner_password_hash = hash_password("secure-pass-1")
+        auth = client.post("/api/web/auth/session", json={"password": "secure-pass-1"})
+        assert auth.status_code == 200
+        assert "access_token" in auth.json()
+        assert SESSION_COOKIE in auth.cookies
+        refreshed = client.post("/api/web/auth/refresh", cookies={SESSION_COOKIE: auth.cookies.get(SESSION_COOKIE)})
+        assert refreshed.status_code == 200
+        assert refreshed.json()["access_token"] != auth.json()["access_token"]
+    finally:
+        settings.web_owner_password_hash = old_hash
+
+
+def test_web_login_rate_limit_and_admin_alert_endpoints():
+    client, _, _ = make_client()
+    _rate_limiter.reset()
+    settings = get_settings()
+    old_count = settings.web_login_rate_limit_count
+    old_window = settings.web_login_rate_limit_window_seconds
+    try:
+        settings.web_login_rate_limit_count = 1
+        settings.web_login_rate_limit_window_seconds = 60
+        ok = client.post("/api/web/auth/login", json={"password": settings.web_owner_password})
+        assert ok.status_code == 200
+        limited = client.post("/api/web/auth/login", json={"password": settings.web_owner_password})
+        assert limited.status_code == 429
+    finally:
+        settings.web_login_rate_limit_count = old_count
+        settings.web_login_rate_limit_window_seconds = old_window
+
+    metrics = client.get("/api/web/admin/metrics/providers", headers=_owner_headers())
+    assert metrics.status_code == 200
+    assert isinstance(metrics.json(), list)
+    alerts = client.get("/api/web/admin/alerts/unanswered", headers=_owner_headers())
+    assert alerts.status_code == 200
+
+
+def test_profile_endpoints_and_admin_analytics_summary():
+    client, _, _ = make_client()
+    current = client.get("/api/web/profile", headers=_user_headers(1001))
+    assert current.status_code == 200
+    assert current.json()["region"] == "unspecified"
+
+    updated = client.patch("/api/web/profile", headers=_user_headers(1001), json={"region": "eu", "species_focus": "cat"})
+    assert updated.status_code == 200
+    assert updated.json()["region"] == "eu"
+
+    summary = client.get("/api/web/admin/analytics/summary", headers=_owner_headers())
+    assert summary.status_code == 200
+    assert "activation_funnel" in summary.json()
+    assert "content_gap_report" in summary.json()

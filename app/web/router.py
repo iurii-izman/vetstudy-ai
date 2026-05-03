@@ -1,18 +1,27 @@
 from datetime import UTC, datetime
+import json
+from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
+from sqlalchemy import String as SQLString
+from sqlalchemy import cast
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models import Document, DocumentChunk, Flashcard, MemoryItem, Message, ModelCall, Session as ChatSession, Subject, Topic, User
-from app.db.repositories import ErrorEventRepo, ModelCallRepo, UserRepo
+from app.analytics import ProductAnalyticsService
+from app.db.models import Document, DocumentChunk, FeedbackEvent, Flashcard, MemoryItem, Message, ModelCall, Session as ChatSession, Subject, Topic, User
+from app.db.repositories import ErrorEventRepo, FeedbackEventRepo, ModelCallRepo, ReviewEventRepo, UserRepo
+from app.learning.service import LearningService
 from app.db.session import get_db
 from app.quotas import QuotaGuard
+from app.web.security import InMemoryRateLimiter, issue_session_token, validate_session_token, verify_password
 
 router = APIRouter(prefix="/api/web", tags=["web"])
+_rate_limiter = InMemoryRateLimiter()
+SESSION_COOKIE = "vetstudy_session"
 
 
 class LoginRequest(BaseModel):
@@ -28,6 +37,11 @@ class UpdateNoteRequest(BaseModel):
 class WebSettingsUpdateRequest(BaseModel):
     language: str | None = None
     role: str | None = None
+
+
+class UserProfileUpdateRequest(BaseModel):
+    region: str
+    species_focus: str
 
 
 class OnboardingRequest(BaseModel):
@@ -46,14 +60,25 @@ class SearchResponse(BaseModel):
     created_at: datetime
 
 
-def _check_token(authorization: str | None = Header(default=None)) -> str:
+class FlashcardReviewRequest(BaseModel):
+    action: str
+
+
+def _check_token(request: Request, authorization: str | None = Header(default=None)) -> str:
     settings = get_settings()
-    expected = settings.web_owner_token
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = authorization.replace("Bearer ", "", 1)
-    if token != expected:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    bearer_token = ""
+    if authorization and authorization.startswith("Bearer "):
+        bearer_token = authorization.replace("Bearer ", "", 1).strip()
+    if bearer_token and bearer_token == settings.web_owner_token:
+        return bearer_token
+    cookie_token = request.cookies.get(SESSION_COOKIE)
+    token = bearer_token or cookie_token
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing authentication token")
+    try:
+        validate_session_token(token, secret=settings.web_session_secret)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid session token: {exc}") from exc
     return token
 
 
@@ -68,15 +93,23 @@ def _fallback_owner_telegram_id(settings) -> int:
 
 
 def _get_current_user(
+    request: Request,
     x_user_telegram_id: int | None = Header(default=None, alias="X-User-Telegram-Id"),
     authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> User:
-    _check_token(authorization)
+    token = _check_token(request, authorization)
     settings = get_settings()
+    token_tg_user: int | None = None
+    token_role: str | None = None
+    is_static_owner_token = token == settings.web_owner_token
+    if not is_static_owner_token:
+        token_tg_user, token_role, _ = validate_session_token(token, secret=settings.web_session_secret)
+        if x_user_telegram_id is not None and x_user_telegram_id != token_tg_user:
+            raise HTTPException(status_code=403, detail="Session token user mismatch")
     owner_fallback = x_user_telegram_id is None
-    telegram_user_id = x_user_telegram_id if x_user_telegram_id is not None else _fallback_owner_telegram_id(settings)
-    role = "owner" if owner_fallback else "user"
+    telegram_user_id = x_user_telegram_id if is_static_owner_token and x_user_telegram_id is not None else (token_tg_user or _fallback_owner_telegram_id(settings))
+    role = token_role or ("owner" if owner_fallback else "user")
     user = UserRepo(db).get_or_create(
         telegram_user_id=telegram_user_id,
         display_name=f"user-{telegram_user_id}",
@@ -127,17 +160,80 @@ def _accessible_topics_query(user: User):
 @router.post("/auth/login")
 def web_login(payload: LoginRequest):
     settings = get_settings()
-    if payload.password != settings.web_owner_password:
+    if not _rate_limiter.allow(
+        key="web-login",
+        limit=settings.web_login_rate_limit_count,
+        window_seconds=settings.web_login_rate_limit_window_seconds,
+    ):
+        raise HTTPException(status_code=429, detail="Login rate limit exceeded")
+    valid = False
+    if settings.web_owner_password_hash:
+        valid = verify_password(payload.password, settings.web_owner_password_hash)
+    if not valid:
+        valid = payload.password == settings.web_owner_password
+    if not valid:
         raise HTTPException(status_code=401, detail="Invalid password")
+    session = issue_session_token(
+        secret=settings.web_session_secret,
+        telegram_user_id=_fallback_owner_telegram_id(settings),
+        role="owner",
+        ttl_seconds=settings.web_session_ttl_seconds,
+    )
     return {
-        "access_token": settings.web_owner_token,
+        "access_token": session.token,
+        "expires_at": session.expires_at.isoformat(),
         "token_type": "bearer",
         "telegram_user_id": _fallback_owner_telegram_id(settings),
     }
 
 
+@router.post("/auth/session")
+def web_login_session(payload: LoginRequest, response: Response):
+    body = web_login(payload)
+    settings = get_settings()
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=body["access_token"],
+        httponly=True,
+        secure=settings.app_env == "prod",
+        samesite="lax",
+        max_age=settings.web_session_ttl_seconds,
+    )
+    return body
+
+
+@router.post("/auth/refresh")
+def web_refresh_session(request: Request, response: Response, authorization: str | None = Header(default=None)):
+    settings = get_settings()
+    token = _check_token(request, authorization)
+    if token == settings.web_owner_token:
+        raise HTTPException(status_code=400, detail="Static owner token is not rotatable")
+    telegram_user_id, role, _ = validate_session_token(token, secret=settings.web_session_secret)
+    rotated = issue_session_token(
+        secret=settings.web_session_secret,
+        telegram_user_id=telegram_user_id,
+        role=role,
+        ttl_seconds=settings.web_session_ttl_seconds,
+    )
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=rotated.token,
+        httponly=True,
+        secure=settings.app_env == "prod",
+        samesite="lax",
+        max_age=settings.web_session_ttl_seconds,
+    )
+    return {
+        "access_token": rotated.token,
+        "expires_at": rotated.expires_at.isoformat(),
+        "token_type": "bearer",
+        "telegram_user_id": telegram_user_id,
+    }
+
+
 @router.get("/me")
 def me(user: User = Depends(_get_current_user)):
+    profile = dict((user.settings or {}).get("profile") or {})
     return {
         "id": user.id,
         "telegram_user_id": user.telegram_user_id,
@@ -152,7 +248,39 @@ def me(user: User = Depends(_get_current_user)):
             "premium_model_per_day": user.quota_premium_model_per_day,
         },
         "billing": {"plan": user.billing_plan, "customer_ref": user.billing_customer_ref},
+        "profile": {
+            "region": profile.get("region", "unspecified"),
+            "species_focus": profile.get("species_focus", "dog_cat"),
+        },
     }
+
+
+@router.get("/profile")
+def get_profile(user: User = Depends(_get_current_user)):
+    profile = dict((user.settings or {}).get("profile") or {})
+    region = str(profile.get("region", "unspecified")).lower()
+    species_focus = str(profile.get("species_focus", "dog_cat")).lower()
+    if region not in {"us", "eu", "local", "unspecified"}:
+        region = "unspecified"
+    if species_focus not in {"dog", "cat", "dog_cat"}:
+        species_focus = "dog_cat"
+    return {"region": region, "species_focus": species_focus}
+
+
+@router.patch("/profile")
+def update_profile(payload: UserProfileUpdateRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    region = payload.region.strip().lower()
+    species_focus = payload.species_focus.strip().lower()
+    if region not in {"us", "eu", "local", "unspecified"}:
+        raise HTTPException(status_code=400, detail="Unsupported region")
+    if species_focus not in {"dog", "cat", "dog_cat"}:
+        raise HTTPException(status_code=400, detail="Unsupported species_focus")
+    settings = dict(user.settings or {})
+    settings["profile"] = {"region": region, "species_focus": species_focus}
+    user.settings = settings
+    db.commit()
+    ProductAnalyticsService(db).track(user_id=user.id, event_name="profile_updated", properties=settings["profile"])
+    return settings["profile"]
 
 
 @router.post("/onboarding")
@@ -239,6 +367,9 @@ def search_memory(
     q: str,
     topic_id: UUID | None = None,
     kind: str | None = None,
+    tag: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     limit: int = 40,
     user: User = Depends(_get_current_user),
     db: Session = Depends(get_db),
@@ -251,6 +382,21 @@ def search_memory(
         query = query.where(MemoryItem.topic_id == topic_id)
     if kind:
         query = query.where(MemoryItem.kind == kind)
+    if tag:
+        if db.bind and db.bind.dialect.name == "postgresql":
+            query = query.where(MemoryItem.tags.contains([tag]))
+        else:
+            query = query.where(cast(MemoryItem.tags, SQLString).ilike(f'%"{tag}"%'))
+    if date_from:
+        try:
+            query = query.where(MemoryItem.created_at >= datetime.fromisoformat(date_from))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid date_from format") from exc
+    if date_to:
+        try:
+            query = query.where(MemoryItem.created_at <= datetime.fromisoformat(date_to))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid date_to format") from exc
     query = query.order_by(MemoryItem.created_at.desc()).limit(min(limit, 100))
     rows = db.execute(query).scalars().all()
     return [
@@ -301,7 +447,22 @@ def list_flashcards(topic_id: UUID | None = None, due_only: bool = False, user: 
         query = query.where(or_(Flashcard.due_at.is_(None), Flashcard.due_at <= datetime.now(UTC)))
     query = query.order_by(Flashcard.created_at.asc())
     rows = db.execute(query).scalars().all()
-    return [{"id": row.id, "topic_id": row.topic_id, "front": row.front, "back": row.back, "tags": row.tags, "due_at": row.due_at, "interval_days": row.interval_days} for row in rows]
+    return [{"id": row.id, "topic_id": row.topic_id, "front": row.front, "back": row.back, "tags": row.tags, "due_at": row.due_at, "interval_days": row.interval_days, "ease": row.ease, "reps": row.reps, "lapses": row.lapses} for row in rows]
+
+
+@router.post("/flashcards/{card_id}/review")
+def review_flashcard(card_id: UUID, payload: FlashcardReviewRequest, user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
+    card = db.execute(select(Flashcard).where(Flashcard.id == card_id, Flashcard.user_id == user.id)).scalar_one_or_none()
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+    if payload.action not in {"again", "hard", "good", "easy"}:
+        raise HTTPException(status_code=400, detail="Unsupported action")
+    updated, score = LearningService().apply_review(card=card, action=payload.action)
+    db.add(updated)
+    db.commit()
+    db.refresh(updated)
+    ReviewEventRepo(db).add(user_id=user.id, topic_id=updated.topic_id, flashcard_id=updated.id, event_type=payload.action, score=score, metadata_={})
+    return {"id": updated.id, "due_at": updated.due_at, "interval_days": updated.interval_days, "ease": updated.ease}
 
 
 @router.get("/stats")
@@ -378,6 +539,9 @@ def delete_account(user: User = Depends(_get_current_user), db: Session = Depend
 
 @router.get("/admin/users")
 def admin_users(_: str = Depends(_check_token), user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
+    settings = get_settings()
+    if not _rate_limiter.allow(key=f"web-admin:{user.telegram_user_id}", limit=settings.web_admin_rate_limit_count, window_seconds=settings.web_admin_rate_limit_window_seconds):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     rows = UserRepo(db).list_all()
     return [{"id": x.id, "telegram_user_id": x.telegram_user_id, "role": x.role, "language": x.language, "onboarding_completed": x.onboarding_completed} for x in rows]
@@ -385,6 +549,9 @@ def admin_users(_: str = Depends(_check_token), user: User = Depends(_get_curren
 
 @router.get("/admin/usage")
 def admin_usage(_: str = Depends(_check_token), user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
+    settings = get_settings()
+    if not _rate_limiter.allow(key=f"web-admin:{user.telegram_user_id}", limit=settings.web_admin_rate_limit_count, window_seconds=settings.web_admin_rate_limit_window_seconds):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     calls, in_tokens, out_tokens, cost = ModelCallRepo(db).usage_all()
     return {"calls": calls, "input_tokens": int(in_tokens), "output_tokens": int(out_tokens), "cost_usd": float(cost)}
@@ -392,9 +559,21 @@ def admin_usage(_: str = Depends(_check_token), user: User = Depends(_get_curren
 
 @router.get("/admin/costs")
 def admin_costs(_: str = Depends(_check_token), user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
+    settings = get_settings()
+    if not _rate_limiter.allow(key=f"web-admin:{user.telegram_user_id}", limit=settings.web_admin_rate_limit_count, window_seconds=settings.web_admin_rate_limit_window_seconds):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
-    rows = db.execute(select(ModelCall.user_id, func.coalesce(func.sum(ModelCall.cost_usd), 0)).group_by(ModelCall.user_id)).all()
-    return [{"user_id": uid, "cost_usd": float(cost)} for uid, cost in rows]
+    rows = db.execute(
+        select(
+            ModelCall.user_id,
+            ModelCall.provider,
+            ModelCall.model,
+            func.count(ModelCall.id),
+            func.coalesce(func.sum(ModelCall.cost_usd), 0),
+        )
+        .group_by(ModelCall.user_id, ModelCall.provider, ModelCall.model)
+    ).all()
+    return [{"user_id": uid, "provider": provider, "model": model, "calls": int(calls), "cost_usd": float(cost)} for uid, provider, model, calls, cost in rows]
 
 
 @router.get("/admin/errors")
@@ -402,6 +581,132 @@ def admin_errors(_: str = Depends(_check_token), user: User = Depends(_get_curre
     _require_admin(user)
     rows = ErrorEventRepo(db).list_recent(limit=200)
     return [{"id": x.id, "user_id": x.user_id, "scope": x.scope, "category": x.category, "details": x.details, "created_at": x.created_at} for x in rows]
+
+
+@router.get("/admin/metrics/providers")
+def admin_provider_metrics(_: str = Depends(_check_token), user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
+    _require_admin(user)
+    rows = db.execute(
+        select(
+            ModelCall.provider,
+            ModelCall.model,
+            func.count(ModelCall.id),
+            func.coalesce(func.avg(ModelCall.latency_ms), 0),
+            func.coalesce(func.sum(ModelCall.cost_usd), 0),
+        ).group_by(ModelCall.provider, ModelCall.model)
+    ).all()
+    return [
+        {
+            "provider": provider,
+            "model": model,
+            "calls": int(calls),
+            "latency_ms_avg": float(latency_avg),
+            "cost_usd_total": float(cost),
+        }
+        for provider, model, calls, latency_avg, cost in rows
+    ]
+
+
+@router.get("/admin/alerts/unanswered")
+def admin_unanswered_alerts(
+    older_than_minutes: int = 20,
+    _: str = Depends(_check_token),
+    user: User = Depends(_get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(user)
+    cutoff = datetime.now(UTC)
+    sessions = db.execute(select(ChatSession)).scalars().all()
+    alerts: list[dict] = []
+    for session in sessions:
+        last_user = db.execute(
+            select(Message)
+            .where(Message.session_id == session.id, Message.role == "user")
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if not last_user:
+            continue
+        last_assistant = db.execute(
+            select(Message)
+            .where(Message.session_id == session.id, Message.role == "assistant")
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if last_assistant and last_assistant.created_at >= last_user.created_at:
+            continue
+        age_minutes = int((cutoff - last_user.created_at).total_seconds() / 60)
+        if age_minutes < older_than_minutes:
+            continue
+        alerts.append(
+            {
+                "session_id": session.id,
+                "user_id": session.user_id,
+                "last_user_message_id": last_user.id,
+                "age_minutes": age_minutes,
+                "preview": last_user.content[:240],
+            }
+        )
+    return alerts
+
+
+@router.get("/admin/feedback")
+def admin_feedback(status: str | None = None, _: str = Depends(_check_token), user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
+    _require_admin(user)
+    rows = FeedbackEventRepo(db).list_recent(limit=200, status=status)
+    return [{"id": x.id, "user_id": x.user_id, "topic_id": x.topic_id, "message_id": x.message_id, "feedback_type": x.feedback_type, "status": x.status, "model": x.model, "details": x.details, "created_at": x.created_at} for x in rows]
+
+
+@router.get("/admin/analytics/summary")
+def admin_analytics_summary(
+    days: int = 30,
+    _: str = Depends(_check_token),
+    user: User = Depends(_get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(user)
+    service = ProductAnalyticsService(db)
+    return {
+        "days": days,
+        "activation_funnel": service.activation_funnel(days=days),
+        "retention_lite": service.retention_lite(days=days),
+        "dau_like": service.dau_like(days=min(max(days, 1), 60)),
+        "content_gap_report": service.content_gap_report(days=days),
+        "behavior": service.behavior_summary(days=days),
+    }
+
+
+@router.patch("/admin/feedback/{feedback_id}")
+def admin_feedback_update(
+    feedback_id: UUID,
+    payload: dict,
+    _: str = Depends(_check_token),
+    user: User = Depends(_get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(user)
+    feedback = db.execute(select(FeedbackEvent).where(FeedbackEvent.id == feedback_id)).scalar_one_or_none()
+    if not feedback:
+        raise HTTPException(status_code=404, detail="Feedback not found")
+    status = str(payload.get("status", "")).strip().lower()
+    if status and status not in {"new", "in_review", "resolved", "ignored"}:
+        raise HTTPException(status_code=400, detail="Unsupported status")
+    if status:
+        feedback.status = status
+    if "details" in payload:
+        feedback.details = payload.get("details")
+    db.add(feedback)
+    db.commit()
+    db.refresh(feedback)
+    return {"id": feedback.id, "status": feedback.status, "details": feedback.details}
+
+
+@router.get("/topics/graph")
+def topics_graph(user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
+    rows = db.execute(_accessible_topics_query(user)).scalars().all()
+    nodes = [{"id": str(t.id), "title": t.title, "parent_id": str(t.parent_id) if t.parent_id else None, "subject_id": str(t.subject_id) if t.subject_id else None} for t in rows]
+    edges = [{"source": str(t.parent_id), "target": str(t.id), "kind": "parent"} for t in rows if t.parent_id]
+    return {"nodes": nodes, "edges": edges}
 
 
 @router.get("/admin/model-settings")
@@ -415,6 +720,63 @@ def admin_model_settings(_: str = Depends(_check_token), user: User = Depends(_g
         "fallback_model": settings.llm_fallback_model,
         "max_request_tokens": settings.llm_max_request_tokens,
     }
+
+
+@router.get("/admin/evidence/source-coverage")
+def admin_evidence_source_coverage(_: str = Depends(_check_token), user: User = Depends(_get_current_user)):
+    _require_admin(user)
+    settings = get_settings()
+    path = Path(settings.evidence_sources_path)
+    if not path.exists():
+        return {"total_sources": 0, "by_region": {}, "by_species": {}, "by_category": {}, "missing": True}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    by_region: dict[str, int] = {}
+    by_species: dict[str, int] = {}
+    by_category: dict[str, int] = {}
+    for row in payload.get("sources", []):
+        by_region[row.get("region", "unknown")] = by_region.get(row.get("region", "unknown"), 0) + 1
+        by_species[row.get("species", "unknown")] = by_species.get(row.get("species", "unknown"), 0) + 1
+        by_category[row.get("category", "unknown")] = by_category.get(row.get("category", "unknown"), 0) + 1
+    return {
+        "total_sources": len(payload.get("sources", [])),
+        "by_region": by_region,
+        "by_species": by_species,
+        "by_category": by_category,
+        "missing": False,
+    }
+
+
+@router.get("/admin/evidence/needs-check")
+def admin_evidence_needs_check(
+    limit: int = 100,
+    _: str = Depends(_check_token),
+    user: User = Depends(_get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(user)
+    rows = db.execute(
+        select(Message)
+        .where(Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .limit(min(limit, 300))
+    ).scalars().all()
+    out = []
+    for row in rows:
+        meta = row.metadata_ or {}
+        evidence = meta.get("evidence") or {}
+        if evidence.get("needs_manual_check") or evidence.get("status") in {"needs_manual_check", "partially_verified"}:
+            out.append(
+                {
+                    "message_id": row.id,
+                    "session_id": row.session_id,
+                    "created_at": row.created_at,
+                    "status": evidence.get("status", "needs_manual_check"),
+                    "citations": evidence.get("citations", []),
+                    "high_risk": bool(meta.get("high_risk")),
+                    "preview": row.content[:280],
+                }
+            )
+    return out
 
 
 @router.patch("/admin/users/{target_user_id}/role")

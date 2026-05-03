@@ -78,7 +78,7 @@ def test_flashcards_review_due_flow():
         FlashcardRepo(db).add_many([card])
         due = FlashcardRepo(db).list_due(user_id=user.id, topic_id=topic.id)
         assert len(due) == 1
-        updated = LearningService().apply_review(card=due[0], action="known", now=datetime.now(UTC))
+        updated, _ = LearningService().apply_review(card=due[0], action="known", now=datetime.now(UTC))
         FlashcardRepo(db).save(updated)
         due_after = FlashcardRepo(db).list_due(user_id=user.id, topic_id=topic.id)
         assert due_after == []

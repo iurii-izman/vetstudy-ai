@@ -23,6 +23,7 @@ DEFAULT_BLOCK_MS = 1000
 DEFAULT_RECLAIM_IDLE_MS = 900_000
 
 _worker_task: asyncio.Task | None = None
+_worker_stop_event: asyncio.Event | None = None
 
 
 @dataclass(frozen=True)
@@ -169,30 +170,41 @@ async def _claim_stale(redis, consumer: str) -> bool:
 async def worker_loop() -> None:
     redis = _redis()
     consumer = _consumer_name()
+    backoff_s = 1.0
     try:
         await ensure_group(redis)
         logger.info("media_worker_started", extra={"stream": _stream_name(), "group": _group_name(), "consumer": consumer})
-        while True:
-            if await _claim_stale(redis, consumer):
-                continue
-            response = await redis.xreadgroup(
-                _group_name(),
-                consumer,
-                streams={_stream_name(): ">"},
-                count=1,
-                block=_block_ms(),
-            )
-            for _, messages in response:
-                for message_id, fields in messages:
-                    await _handle_stream_message(redis, message_id, fields)
+        while not (_worker_stop_event and _worker_stop_event.is_set()):
+            try:
+                if await _claim_stale(redis, consumer):
+                    backoff_s = 1.0
+                    continue
+                response = await redis.xreadgroup(
+                    _group_name(),
+                    consumer,
+                    streams={_stream_name(): ">"},
+                    count=1,
+                    block=_block_ms(),
+                )
+                for _, messages in response:
+                    for message_id, fields in messages:
+                        await _handle_stream_message(redis, message_id, fields)
+                backoff_s = 1.0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("media_worker_loop_error", extra={"event": "media_worker_loop_error", "error": str(exc), "error_category": "worker_error"})
+                await asyncio.sleep(backoff_s)
+                backoff_s = min(backoff_s * 2.0, 20.0)
     finally:
         await redis.aclose()
 
 
 def start_worker() -> None:
-    global _worker_task
+    global _worker_task, _worker_stop_event
     if _worker_task and not _worker_task.done():
         return
+    _worker_stop_event = asyncio.Event()
     _worker_task = asyncio.create_task(worker_loop())
 
 
@@ -200,6 +212,8 @@ async def stop_worker() -> None:
     global _worker_task
     if not _worker_task:
         return
+    if _worker_stop_event:
+        _worker_stop_event.set()
     _worker_task.cancel()
     try:
         await _worker_task

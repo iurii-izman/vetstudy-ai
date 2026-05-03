@@ -291,7 +291,7 @@ dt {
 
 .search-box {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto minmax(80px, 120px) minmax(80px, 120px);
   gap: 8px;
 }
 
@@ -299,6 +299,11 @@ dt {
   display: flex;
   gap: 6px;
   justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.muted {
+  color: var(--muted);
 }
 
 .main-nav a {
@@ -725,7 +730,7 @@ dd {
   }
 
   .search-box {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 1fr;
   }
 
   .memory-row {

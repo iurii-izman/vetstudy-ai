@@ -9,8 +9,8 @@ from app.telegram import handlers
 
 
 class FakeMessage:
-    def __init__(self, *, user_id=1, chat_id=100, thread_id=777, text="hello"):
-        self.from_user = SimpleNamespace(id=user_id, full_name="User Test")
+    def __init__(self, *, user_id=1, chat_id=100, thread_id=777, text="hello", username=None):
+        self.from_user = SimpleNamespace(id=user_id, full_name="User Test", username=username)
         self.chat = SimpleNamespace(id=chat_id)
         self.message_thread_id = thread_id
         self.text = text
@@ -216,6 +216,7 @@ async def test_allowlist_for_start(monkeypatch):
     await handlers.cmd_start(message)
     assert message.answers
     assert "Доступ запрещен" in message.answers[0]["text"]
+    assert "1" in message.answers[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -228,6 +229,51 @@ async def test_allowlist_for_mode(monkeypatch):
     await handlers.cmd_mode(message, SimpleNamespace(args="practical"))
     assert message.answers
     assert "Доступ запрещен" in message.answers[0]["text"]
+    assert "1" in message.answers[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_allowlist_accepts_username(monkeypatch):
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: SimpleNamespace(allowed_user_ids={999}, allowed_usernames={"student_user"}),
+    )
+    message = FakeMessage(user_id=1, username="student_user")
+    await handlers.cmd_start(message)
+    assert message.answers
+    assert "VetStudy AI готов" in message.answers[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_mode_evidence_allowed(monkeypatch):
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={}),
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1"),
+        ),
+    )
+    monkeypatch.setattr(handlers, "SessionRepo", lambda db: SimpleNamespace(get_active=lambda *a, **k: SimpleNamespace(mode="practical"), new_active=lambda *a, **k: SimpleNamespace(mode="practical")))
+    monkeypatch.setattr(handlers, "UserRepo", lambda db: SimpleNamespace(set_mode_preference=lambda *a, **k: None))
+    message = FakeMessage(user_id=1, text="/mode evidence")
+    await handlers.cmd_mode(message, SimpleNamespace(args="evidence"))
+    assert any("evidence" in item["text"] for item in message.answers)
+
+
+@pytest.mark.asyncio
+async def test_profile_command_updates_settings(monkeypatch):
+    user = SimpleNamespace(id="u-1", settings={})
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(handlers, "UserRepo", lambda db: SimpleNamespace(get_or_create=lambda *a, **k: user))
+    monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **k: None))
+    message = FakeMessage(user_id=1, text="/profile region=eu species=cat")
+    await handlers.cmd_profile(message, SimpleNamespace(args="region=eu species=cat"))
+    assert user.settings["profile"]["region"] == "eu"
+    assert user.settings["profile"]["species_focus"] == "cat"
 
 
 @pytest.mark.asyncio

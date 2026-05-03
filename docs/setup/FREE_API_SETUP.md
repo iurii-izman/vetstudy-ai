@@ -21,15 +21,17 @@
 Скопируйте `.env.example` в `.env` и заполните только эти поля:
 
 ```env
-TELEGRAM_BOT_TOKEN=<BOTFATHER_TOKEN>
+TELEGRAM_BOT_TOKEN=
 ALLOWED_TELEGRAM_USER_IDS=<ВАШ_TELEGRAM_USER_ID>
 USER_ID_HASH_SALT=<ЛЮБАЯ_ДЛИННАЯ_СТРОКА>
 WEB_OWNER_TELEGRAM_ID=<ВАШ_TELEGRAM_USER_ID>
-WEB_OWNER_PASSWORD=<ДЛИННЫЙ_ПАРОЛЬ_ДЛЯ_WEB>
+WEB_OWNER_PASSWORD_HASH=<PBKDF2_HASH_ИЛИ_ОСТАВЬТЕ_ПУСТЫМ>
+WEB_OWNER_PASSWORD=<ДЛИННЫЙ_ПАРОЛЬ_ДЛЯ_WEB_ЕСЛИ_HASH_НЕ_ИСПОЛЬЗУЕТСЯ>
 WEB_OWNER_TOKEN=<ДЛИННЫЙ_RANDOM_TOKEN_ДЛЯ_WEB>
+WEB_SESSION_SECRET=<ДЛИННЫЙ_RANDOM_SECRET_ДЛЯ_SESSION>
 
-OPENROUTER_API_KEY=<OPENROUTER_KEY>
-GROQ_API_KEY=<GROQ_KEY>
+OPENROUTER_API_KEY=
+GROQ_API_KEY=
 ```
 
 Остальное уже преднастроено в `.env.example` под бесплатный beta-режим:
@@ -66,7 +68,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 Ожидаемо:
 - бот отвечает по теме;
-- если OpenRouter временно недоступен, должен сработать Groq fallback.
+- если Groq временно недоступен, должен сработать OpenRouter fallback.
 
 ## 6) Быстрая диагностика проблем
 

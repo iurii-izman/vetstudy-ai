@@ -21,6 +21,17 @@ import logging
 
 settings = get_settings()
 configure_logging()
+if settings.sentry_dsn:
+    try:
+        import sentry_sdk
+
+        sentry_sdk.init(
+            dsn=settings.sentry_dsn,
+            environment=settings.app_env,
+            traces_sample_rate=0.05,
+        )
+    except Exception:
+        logging.getLogger("app.main").exception("sentry_init_failed")
 
 
 def seed_subjects():

@@ -58,3 +58,11 @@ def test_format_ai_answer_converts_markdown_table_to_readable_blocks():
     assert "⚠️ <b>Красный флаг: необходима консультация специалиста</b>" in rendered
     assert "| № |" not in rendered
     assert "**" not in rendered
+
+
+def test_format_ai_answer_keeps_evidence_citations_readable():
+    text = """**Citations**\n- EMA Meloxicam Product Information [chunk-1]\n- WSAVA Emergency Red Flags [mem-2]\n\n**Статус:** `needs_manual_check`"""
+    rendered = format_ai_answer_for_telegram(text)
+    assert "EMA Meloxicam Product Information [chunk-1]" in rendered
+    assert "WSAVA Emergency Red Flags [mem-2]" in rendered
+    assert "<code>needs_manual_check</code>" in rendered

@@ -6,6 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml README.md ./
+COPY requirements.lock ./
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
@@ -19,7 +20,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN addgroup --system app && adduser --system --ingroup app app
 WORKDIR /app
 COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
+COPY requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock && pip install --no-cache-dir --no-deps /wheels/* && rm -rf /wheels
 COPY --chown=app:app . .
 USER app
 EXPOSE 8000

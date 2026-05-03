@@ -7,7 +7,7 @@ SNAPSHOTS_DIR = Path(__file__).parent / "snapshots"
 
 
 def _snapshot(name: str) -> str:
-    return (SNAPSHOTS_DIR / name).read_text(encoding="utf-8").removesuffix("\n")
+    return (SNAPSHOTS_DIR / name).read_text(encoding="utf-8").rstrip("\r\n")
 
 
 def test_prompt_snapshot_pharmacology_practical():
@@ -45,3 +45,15 @@ def test_pharmacology_dosing_guard_text_present():
         session_history=[],
     )
     assert "Дозировки: только через safety gate" in prompt
+
+
+def test_prompt_snapshot_evidence_mode():
+    pm = PromptManager()
+    prompt = pm.build(
+        mode="evidence",
+        subject="general",
+        user_message="Какие красные флаги при одышке?",
+        memory_chunks=["[source=WSAVA Emergency Red Flags doc=d1 chunk=c1] severe dyspnea requires urgent care"],
+        session_history=[],
+    )
+    assert prompt == _snapshot("prompt_evidence_general.txt")

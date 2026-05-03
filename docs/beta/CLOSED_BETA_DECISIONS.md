@@ -29,8 +29,11 @@ Still required before broader beta:
 Decision for closed beta:
 
 - Do not ingest proprietary formularies or paid veterinary books unless the project owner has an explicit license.
-- Use only user-owned notes/files or public sources for early Evidence/RAG work.
-- Dosing content should be marked as requiring verification against the current label/formulary.
+- Real working dosage support is needed for study cases, with Transnistria as the default location.
+- Use a Moldova-first regional check: ANSA Moldova State Register for registered veterinary products and market relevance, then exact product label/SPC or licensed formulary for the dose.
+- Use only user-owned notes/files, official product labels/SPC, public regulator pages, public professional guidelines, or explicitly licensed formularies.
+- Numeric dosing content must cite or name the source basis and should be marked `needs_manual_check` when product match, patient data, or regional availability is incomplete.
+- The tracked source registry is `quality/evidence_sources/sources.json`; the operating policy is `quality/dosage_policy_transnistria.md`.
 
 Allowed source classes for private beta:
 
@@ -38,12 +41,23 @@ Allowed source classes for private beta:
 - Public professional guidelines.
 - User-owned lecture notes and documents.
 - Official product labels and regulator pages where available.
+- Official Moldova/ANSA product registration metadata for regional availability checks.
+- EMA/EU product information or SPC when it matches the exact product/species/route.
+- Licensed Plumb's/BSAVA excerpts only after the project owner confirms license rights.
 
 Not allowed without manual licensing:
 
 - Full copied tables from proprietary formularies.
 - Paid textbook chapters.
 - Scraped commercial veterinary reference content.
+
+Source decisions checked on 2026-05-03:
+
+- ANSA provides the public Moldova veterinary medicinal product register with search/filter fields such as target species, registration status, release mode, and product detail pages. Source: [ANSA Veterinary Medicinal Product Register](https://registru.ansa.gov.md/ro/registru).
+- EU Veterinary Medicines Information says it provides official, up-to-date information from the Union Product Database for medicines authorised in the EU/EEA. Source: [EU Veterinary Medicines Information](https://medicines.health.europa.eu/veterinary/en/about-website).
+- EMA veterinary product information templates include SPC sections for interactions and administration routes/dosage. Source: [EMA veterinary product information templates](https://www.ema.europa.eu/en/veterinary-regulatory-overview/marketing-authorisation-veterinary-medicines/product-information-requirements-veterinary-medicines/veterinary-product-information-qrd-templates).
+- Merck/MSD Veterinary Manual warns that manual content is not a substitute for manufacturer prescribing information or drug labels and that local sources may differ outside the US. Source: [Merck Veterinary Manual disclaimer](https://www.merckvetmanual.com/resourcespages/disclaimer).
+- Plumb's and BSAVA remain preferred practical formularies only after a valid subscription/license. Sources: [Plumb's plan info](https://help.plumbs.com/en/articles/10572179-choosing-the-right-plan-for-you), [BSAVA Formulary](https://www.bsava.com/formulary/).
 
 ## 3. Legal / Safety Notice Draft
 
@@ -151,15 +165,19 @@ Required private-beta smoke:
 Closed for private beta:
 
 - `ALLOWED_TELEGRAM_USER_IDS` is set and preflight passes.
+- `ALLOWED_TELEGRAM_USERNAMES` is supported for a temporary private-beta username allowlist until the stable numeric Telegram ID is confirmed.
+- Bot API probe on 2026-05-03 confirmed the configured bot is reachable, but `getUpdates` had no pending updates and Telegram does not resolve an ordinary user ID from a plain username alone.
+- The bot now shows a denied user's own Telegram ID in the access-denied message, so a beta student can send `/start` and copy that ID for allowlist setup without using third-party ID bots.
 
 Decision:
 
 - For one-person beta, allowlist must contain exactly the student and owner/tester IDs required for the session.
+- For this private beta, username allowlist is acceptable as a temporary bridge, but numeric Telegram IDs remain the preferred stable allowlist.
 - Do not run with an empty allowlist outside isolated local development.
 
 Manual confirmation still required:
 
-- The owner must confirm the actual Telegram IDs because the assistant should not print or expose them.
+- The owner must confirm the actual Telegram IDs before live beta. Do not paste IDs into public chats or logs; use `.env`/secret manager only.
 
 ## 10. Commercial / Data Processing Terms
 
@@ -242,20 +260,17 @@ Manual part:
 
 ## 15. Git / Release Hygiene
 
-Closed during this review:
+Closed during this release pass:
 
-- The folder was not a git repository.
-- A git repository was initialized.
-- `.gitignore` and `.dockerignore` were tightened for `.ruff_cache/` and `*.egg-info/`.
-- Initial commit created: `a131728 chore: initialize project repository`.
-- `.env`, `artifacts/`, caches, `web/node_modules/`, `web/dist/`, and egg-info are ignored.
+- The local repository has a GitHub remote: `git@github.com:iurii-izman/vetstudy-ai.git`.
+- The public beta repository is configured with topics, issues, projects, squash-only PR settings, secret scanning, and push protection.
+- `.gitignore`, `.dockerignore`, and `.gitattributes` cover `.env`, local data, backups, caches, build output, generated audit artifacts, and line-ending normalization.
+- GitHub issue templates, PR template, Dependabot, dependency review, CodeQL, `AGENTS.md`, `SECURITY.md`, `CONTRIBUTING.md`, and `CHANGELOG.md` are present.
 
-Still recommended:
+Still recommended after first push:
 
-- Push to a private remote repository.
-- Use PRs for future changes.
-- Add branch protection after remote setup.
-- Consider `.gitattributes` for line-ending normalization.
+- Enable branch protection/ruleset for `main`.
+- Use PRs for future feature work after the beta baseline is published.
 
 ## Remaining Manual-Only Actions
 
@@ -263,9 +278,8 @@ These are the only items that still genuinely require the project owner or a hum
 
 1. Confirm the actual Telegram allowlist IDs without exposing them in chat/logs.
 2. Run the real Telegram smoke in the private group with the actual bot permissions.
-3. Decide whether to push this new git repository to GitHub/GitLab/etc. and create the private remote.
-4. Rotate real Telegram/LLM/web secrets before any non-local or broader beta.
-5. Choose and license any proprietary veterinary formularies or paid source material.
-6. Have a veterinarian or advanced reviewer validate the golden set and representative high-risk answers before broader release.
-7. Review provider terms on the actual accounts before public/commercial use.
-8. Make the final public-beta go/no-go decision after private beta feedback.
+3. Rotate real Telegram/LLM/web secrets before any non-local or broader beta.
+4. License proprietary veterinary formularies or paid source material if the beta must use Plumb's/BSAVA content beyond user-owned notes and official/public sources.
+5. Have a veterinarian or advanced reviewer validate the golden set and representative high-risk answers before broader release.
+6. Review provider terms on the actual accounts before public/commercial use.
+7. Make the final public-beta go/no-go decision after private beta feedback.

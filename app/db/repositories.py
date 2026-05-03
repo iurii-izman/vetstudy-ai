@@ -9,6 +9,7 @@ from app.db.models import (
     DocumentChunk,
     ErrorEvent,
     Flashcard,
+    FeedbackEvent,
     MemoryItem,
     Message,
     ModelCall,
@@ -192,6 +193,12 @@ class MemoryRepo:
         q = select(MemoryItem).where(MemoryItem.topic_id == topic_id).order_by(MemoryItem.created_at.desc()).limit(limit)
         return list(self.db.execute(q).scalars().all())
 
+    def add_many(self, rows: list[MemoryItem]) -> None:
+        if not rows:
+            return
+        self.db.add_all(rows)
+        self.db.commit()
+
     def search(self, topic_id, query: str, limit: int = 5) -> list[MemoryItem]:
         q = (
             select(MemoryItem)
@@ -287,6 +294,12 @@ class DocumentChunkRepo:
         self.db.refresh(row)
         return row
 
+    def add_many(self, rows: list[DocumentChunk]) -> None:
+        if not rows:
+            return
+        self.db.add_all(rows)
+        self.db.commit()
+
     def search_hybrid(self, *, user_id, query: str, query_tags: list[str], query_vec: list[float], current_topic_id=None, top_k: int = 5, cross_topic: bool = True):
         lexical = func.coalesce(func.length(DocumentChunk.content) - func.length(func.replace(func.lower(DocumentChunk.content), func.lower(query), "")), 0)
         lexical = cast(lexical, Float) / cast(func.nullif(func.length(query), 0), Float)
@@ -337,6 +350,24 @@ class ReviewEventRepo:
         self.db.commit()
         self.db.refresh(row)
         return row
+
+
+class FeedbackEventRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def add(self, **kwargs) -> FeedbackEvent:
+        row = FeedbackEvent(**kwargs)
+        self.db.add(row)
+        self.db.commit()
+        self.db.refresh(row)
+        return row
+
+    def list_recent(self, limit: int = 200, status: str | None = None) -> list[FeedbackEvent]:
+        query = select(FeedbackEvent).order_by(FeedbackEvent.created_at.desc()).limit(limit)
+        if status:
+            query = query.where(FeedbackEvent.status == status)
+        return list(self.db.execute(query).scalars().all())
 
 
 class FlashcardRepo:

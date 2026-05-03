@@ -22,12 +22,15 @@ def test_review_flow_updates_due_interval_and_ease():
     service = LearningService()
     now = datetime(2026, 1, 1, 10, 0, 0)
     card = SimpleNamespace(ease=2.5, interval_days=1, due_at=now)
-    known = service.apply_review(card=card, action="known", now=now)
+    known, score_known = service.apply_review(card=card, action="known", now=now)
+    assert score_known == 4
     assert known.interval_days >= 2
     assert known.due_at == now + timedelta(days=known.interval_days)
-    unknown = service.apply_review(card=known, action="unknown", now=now)
+    unknown, score_unknown = service.apply_review(card=known, action="unknown", now=now)
+    assert score_unknown == 1
     assert unknown.interval_days == 1
-    later = service.apply_review(card=unknown, action="later", now=now)
+    later, score_later = service.apply_review(card=unknown, action="later", now=now)
+    assert score_later == 2
     assert later.interval_days >= 1
 
 
@@ -44,3 +47,18 @@ def test_anki_csv_export_escapes_commas_and_newlines():
     assert '"Front, ""quoted""' in csv_data
     assert "line2" in csv_data
     assert '"Back,\nmultiline"' in csv_data
+
+
+def test_normalize_cards_deduplicates_and_validates():
+    service = LearningService()
+    payload = {
+        "cards": [
+            {"front": "Что делать при дегидратации?", "back": "Оценить степень и начать инфузию.", "difficulty": "easy", "tags": ["fluid"]},
+            {"front": "Что делать при дегидратации?", "back": "Оценить степень и начать инфузию.", "difficulty": "easy", "tags": ["fluid"]},
+            {"front": "short", "back": "too short"},
+        ]
+    }
+    items = service._normalize_card_payload(payload, count=5, tags=["cards"])
+    assert len(items) == 1
+    assert items[0]["difficulty"] == "easy"
+    assert "cards" in items[0]["tags"]

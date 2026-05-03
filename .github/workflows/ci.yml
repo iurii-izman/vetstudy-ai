@@ -2,8 +2,15 @@ name: CI
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: ["main"]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   checks:
@@ -27,20 +34,23 @@ jobs:
       REDIS_URL: ""
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements-dev.lock
 
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev]
+          pip install -r requirements-dev.lock
+          pip install -e . --no-deps
 
       - name: Lint
-        run: ruff check app
+        run: ruff check .
 
       - name: Migration check
         run: alembic upgrade head
@@ -49,7 +59,7 @@ jobs:
         run: pytest -q
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: "npm"

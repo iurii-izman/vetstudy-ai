@@ -24,6 +24,10 @@ class PostGenerationValidator:
     _TOX_PATTERN = re.compile(r"\b(парацетамол|acetaminophen|отрав\w*|токс\w*)\b", re.IGNORECASE)
     _INTERACTION_ASSERTIVE_PATTERN = re.compile(r"\b(нет\s+взаимодействий|взаимодействий\s+нет)\b", re.IGNORECASE)
     _INTERACTION_CHECK_PATTERN = re.compile(r"\b(провер|инструкц|справочник|формуляр)\b", re.IGNORECASE)
+    _DOSAGE_SOURCE_PATTERN = re.compile(
+        r"\b(источник|цитат|citation|ansa|ema|upd|spc|smpc|инструкц|label|листок|формуляр|formulary|plumb|bsava|merck|msd)\b",
+        re.IGNORECASE,
+    )
     _SOURCE_UNCERTAIN_PATTERN = re.compile(r"\b(форум|reddit|тикток|знаком\w+\s+сказал)\b", re.IGNORECASE)
     _SOURCE_CHECK_PATTERN = re.compile(r"\b(требует\s+проверки|нужно\s+проверить|проверьте\s+источник)\b", re.IGNORECASE)
     _DIAGNOSIS_CERTAINTY_PATTERN = re.compile(r"\b(точный\s+диагноз|окончательный\s+диагноз|это\s+точно)\b", re.IGNORECASE)
@@ -37,6 +41,8 @@ class PostGenerationValidator:
 
         if (self._DOSAGE_CALC_PATTERN.search(q) or self._HAS_NUMERIC_DOSING.search(a)) and self._HAS_NUMERIC_DOSING.search(a) and not self._HAS_REQUIRED_DOSING_DATA.search(q):
             flags.append("dosage_missing_required_data")
+        if self._HAS_NUMERIC_DOSING.search(a) and not self._DOSAGE_SOURCE_PATTERN.search(a):
+            flags.append("dosage_without_source_reference")
         if self._EMERGENCY_PATTERN.search(q):
             if not self._TRIAGE_PATTERN.search(a):
                 flags.append("emergency_no_escalation")
