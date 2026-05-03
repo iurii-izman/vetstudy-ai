@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 from app.config import get_settings
 
 from app.analytics import ProductAnalyticsService
@@ -287,6 +287,18 @@ def _build_review_keyboard(card_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def _build_main_menu_reply_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📅 На сегодня"), KeyboardButton(text="🩺 Кейсы")],
+            [KeyboardButton(text="🧠 Карточки"), KeyboardButton(text="➕ Создать")],
+            [KeyboardButton(text="📚 Темы"), KeyboardButton(text="⚙️ Профиль")],
+        ],
+        resize_keyboard=True,
+        persistent=True,
+    )
+
+
 def _callback_secret() -> str:
     settings = get_settings()
     return getattr(settings, "user_id_hash_salt", "") or getattr(settings, "web_owner_token", "") or "dev-callback-secret"
@@ -547,14 +559,42 @@ async def cmd_start(message: Message):
         db.close()
     await message.answer(
         "VetStudy AI готов.\n"
-        "Next steps:\n"
+        "Для работы используйте кнопки меню или команды:\n"
         "1) /create_default_topics\n"
         "2) или /bind_topic <slug_or_name>\n"
-        "3) задайте вопрос в topic\n"
-        "4) дневной маршрут: /today\n"
-        "5) учёба: /cards -> /review -> /quiz\n"
-        "Подсказки: /help",
+        "3) задайте вопрос в topic\n",
+        reply_markup=_build_main_menu_reply_keyboard(),
     )
+
+
+@router.message(F.text == "📅 На сегодня")
+async def text_today(message: Message):
+    await cmd_today(message)
+
+
+@router.message(F.text == "🩺 Кейсы")
+async def text_case(message: Message):
+    await cmd_case(message, CommandObject(command="/case", args=""))
+
+
+@router.message(F.text == "🧠 Карточки")
+async def text_review(message: Message):
+    await cmd_review(message)
+
+
+@router.message(F.text == "➕ Создать")
+async def text_cards(message: Message):
+    await cmd_cards(message, CommandObject(command="/cards", args=""))
+
+
+@router.message(F.text == "📚 Темы")
+async def text_topics(message: Message):
+    await cmd_topics(message)
+
+
+@router.message(F.text == "⚙️ Профиль")
+async def text_profile(message: Message):
+    await cmd_profile(message, CommandObject(command="/profile", args=""))
 
 
 @router.message(Command("help"))
