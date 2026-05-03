@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import math
 import re
 from typing import Any
@@ -224,9 +225,17 @@ class MemoryService:
     def _vector_values(vector: Any) -> list[float]:
         if vector is None:
             return []
+        if isinstance(vector, str):
+            try:
+                parsed = json.loads(vector)
+            except json.JSONDecodeError:
+                return []
+            if not isinstance(parsed, list):
+                return []
+            vector = parsed
         try:
             return [float(x) for x in vector]
-        except TypeError:
+        except (TypeError, ValueError):
             return []
 
     @staticmethod

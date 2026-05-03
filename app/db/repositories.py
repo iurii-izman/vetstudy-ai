@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import cast, func, literal, literal_column, or_, select
+from sqlalchemy import case, cast, func, literal, literal_column, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.types import Float
 
@@ -305,23 +305,30 @@ class DocumentChunkRepo:
         lexical = cast(lexical, Float) / cast(func.nullif(func.length(query), 0), Float)
         lexical = func.coalesce(lexical, 0.0)
 
-        topic_boost = literal(2.0) if current_topic_id is None else func.coalesce(cast((DocumentChunk.topic_id == current_topic_id), Float) * 2.0, 0.0)
+        topic_boost = (
+            literal(2.0)
+            if current_topic_id is None
+            else case((DocumentChunk.topic_id == current_topic_id, literal(2.0)), else_=literal(0.0))
+        )
         tag_score = literal(0.0)
         if query_tags and self.db.bind and self.db.bind.dialect.name == "postgresql":
-            tag_score = cast(DocumentChunk.tags.op("&&")(query_tags), Float) * 1.25
+            tag_score = case((DocumentChunk.tags.op("&&")(query_tags), literal(1.25)), else_=literal(0.0))
 
+        score_expr = lexical + tag_score + topic_boost
         query_stmt = select(
             DocumentChunk,
-            (lexical + tag_score + topic_boost).label("score"),
+            score_expr.label("score"),
         ).where(DocumentChunk.user_id == user_id)
         if not cross_topic and current_topic_id is not None:
             query_stmt = query_stmt.where(DocumentChunk.topic_id == current_topic_id)
 
         if query_vec and self.db.bind and self.db.bind.dialect.name == "postgresql":
-            vector_literal = "[" + ",".join(str(float(x)) for x in query_vec) + "]"
-            vector_distance = DocumentChunk.embedding.op("<=>")(vector_literal)
+            vector_distance = DocumentChunk.embedding.op("<=>")(query_vec)
             vector_score = (literal(1.0) - cast(vector_distance, Float)) * 2.5
-            query_stmt = query_stmt.add_columns((lexical + tag_score + topic_boost + vector_score).label("score"))
+            score_expr = score_expr + vector_score
+            query_stmt = select(DocumentChunk, score_expr.label("score")).where(DocumentChunk.user_id == user_id)
+            if not cross_topic and current_topic_id is not None:
+                query_stmt = query_stmt.where(DocumentChunk.topic_id == current_topic_id)
 
         query_stmt = query_stmt.order_by(literal_column("score").desc(), DocumentChunk.created_at.desc()).limit(min(top_k, 20))
         rows = self.db.execute(query_stmt).all()

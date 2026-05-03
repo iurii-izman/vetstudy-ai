@@ -82,6 +82,38 @@ npm ci
 npm run dev
 ```
 
+## Windows Auto-Recovery (after reboot)
+
+For local private beta on Windows, first try scheduled self-heal tasks:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/install_selfheal_tasks.ps1
+```
+
+If you want elevated tasks, run the same command from Administrator PowerShell with `-RunElevated`.
+
+If Task Scheduler is blocked by system policy, use Startup-folder watchdog fallback:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/install_startup_watchdog.ps1
+```
+
+What this gives:
+
+- task `VetStudyAI-Autostart`: runs at logon, starts compose stack, waits for `http://localhost:8000/ready`, runs deep preflight (`--db --schema`);
+- task `VetStudyAI-SelfHeal-10min`: every 10 minutes ensures services are up, checks readiness, runs quick preflight (`--db`), and captures recent logs on failure;
+- or Startup watchdog launcher (`VetStudyAI-Watchdog.cmd`) that runs deep check once, then quick checks every 10 minutes;
+- `bot` has Telegram `getMe` healthcheck; self-heal restarts bot if it becomes unhealthy;
+- docker services use `restart: unless-stopped`, so containers recover after Docker restarts.
+
+Manual one-click recovery command (can be attached to a shortcut):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/ensure_stack.ps1 -DeepChecks
+```
+
+Logs are written to `artifacts/ops_logs/`.
+
 ## Validation
 
 ```bash

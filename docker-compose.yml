@@ -15,6 +15,7 @@ services:
     volumes:
       - ./:/app
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3).read()\""]
       interval: 20s
@@ -33,8 +34,17 @@ services:
     volumes:
       - ./:/app
     command: sh -c "python -m app.run_polling"
+    restart: unless-stopped
     healthcheck:
-      disable: true
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import json, os, urllib.request; token = os.getenv('TELEGRAM_BOT_TOKEN', ''); assert token; url = f'https://api.telegram.org/bot{token}/getMe'; data = json.loads(urllib.request.urlopen(url, timeout=10).read().decode()); assert data.get('ok') is True\"",
+        ]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 20s
 
   media-worker:
     build:
@@ -50,6 +60,7 @@ services:
     volumes:
       - ./:/app
     command: sh -c "python -m app.media.worker"
+    restart: unless-stopped
     healthcheck:
       disable: true
 
@@ -63,6 +74,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d vetstudy"]
       interval: 10s
@@ -76,6 +88,7 @@ services:
       - "6379:6379"
     volumes:
       - redisdata:/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s

@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -26,7 +27,7 @@ from app.media.types import FileTooLargeError, UnsupportedMediaError
 from app.memory.service import MemoryService
 from app.evidence import EvidenceService
 from app.quotas import QuotaGuard
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from app.services import llm_router, prompt_manager, safety_gate
 from app.telegram.formatting import TELEGRAM_HTML_PARSE_MODE, format_ai_answer_for_telegram, split_for_telegram, strip_telegram_html
 
@@ -385,140 +386,150 @@ async def _send_ai_answer(message: Message, answer: str, *, with_keyboard: bool 
 
 
 async def _run_text_pipeline(message: Message, user, topic, text: str, *, metadata: dict | None = None):
-    db = new_session()
-    try:
-        await _send_typing(message)
-        quota = QuotaGuard(get_settings()).check_user_and_global(db, user)
-        if not quota.allowed:
-            await message.answer(quota.message or "Лимит исчерпан.")
-            return
-        chat_db = ChatDBService(db)
-        preferred_mode = (user.settings or {}).get("mode", "practical")
-        evidence = EvidenceService()
-        session = chat_db.get_or_create_active_session(user.id, topic.id, mode=preferred_mode)
-        profile = _user_profile(user)
-        analytics = ProductAnalyticsService(db)
-        chat_db.save_user_message(session.id, text, message.message_id)
-        analytics.track(
-            user_id=user.id,
-            topic_id=topic.id,
-            session_id=session.id,
-            event_name="activation_first_question",
-            properties={"topic_title": getattr(topic, "title", "unknown"), "mode": session.mode},
-        )
-        safety = safety_gate.check(text)
-        if not safety.allowed:
-            warn = safety.warning or "Недостаточно данных."
-            if safety.clarifying_questions:
-                warn = f"{warn}\n\n" + "\n".join(f"- {q}" for q in safety.clarifying_questions)
-            await message.answer(warn)
-            return
-        memory = MemoryService(MemoryRepo(db), topic_repo=TopicRepo(db), embedder=llm_router, chunk_repo=DocumentChunkRepo(db))
-        search_results = await memory.search(db=db, user_id=user.id, query=text, current_topic_id=topic.id, top_k=5, cross_topic=True)
-        memory_chunks = [
-            f"[source={item.source_title or 'memory'} doc={item.document_id or '-'} chunk={item.chunk_id or item.memory_id or '-'}] {item.snippet}"
-            for item in search_results
-        ]
-        subject = SubjectRepo(db).get_by_id(topic.subject_id)
-        history_rows = MessageRepo(db).recent_for_session(session.id, limit=6)
-        high_risk = evidence.is_high_risk(text, getattr(safety, "risk_tags", []))
-        if high_risk:
+    for attempt in range(2):
+        db = new_session()
+        try:
+            await _send_typing(message)
+            quota = QuotaGuard(get_settings()).check_user_and_global(db, user)
+            if not quota.allowed:
+                await message.answer(quota.message or "Лимит исчерпан.")
+                return
+            chat_db = ChatDBService(db)
+            preferred_mode = (user.settings or {}).get("mode", "practical")
+            evidence = EvidenceService()
+            session = chat_db.get_or_create_active_session(user.id, topic.id, mode=preferred_mode)
+            profile = _user_profile(user)
+            analytics = ProductAnalyticsService(db)
+            chat_db.save_user_message(session.id, text, message.message_id)
             analytics.track(
                 user_id=user.id,
                 topic_id=topic.id,
                 session_id=session.id,
-                event_name="high_risk_query",
-                properties={"risk_tags": getattr(safety, "risk_tags", [])},
+                event_name="activation_first_question",
+                properties={"topic_title": getattr(topic, "title", "unknown"), "mode": session.mode},
             )
-        effective_mode = "evidence" if (session.mode == "evidence" or high_risk) else session.mode
-        preferred_sources = evidence.preferred_sources(region=profile["region"], species_focus=profile["species_focus"])
-        prompt = prompt_manager.build(
-            mode=effective_mode,
-            subject=subject.slug if subject else "general",
-            user_message=text,
-            memory_chunks=memory_chunks,
-            session_history=[f"{row.role}: {row.content[:200]}" for row in history_rows],
-            region=profile["region"],
-            species_focus=profile["species_focus"],
-            evidence_preference=", ".join(preferred_sources) if preferred_sources else None,
-            safety_warning=safety.warning,
-        )
-        prompt += "\n\nEVIDENCE_POLICY:\n- Используй только факты, подтверждённые блоком RETRIEVED_MEMORY.\n- Не делай уверенных утверждений, если в памяти нет подтверждения.\n- Для каждого клинического тезиса добавляй ссылку вида [doc/chunk]."
-        answer = await llm_router.generate(db, user.id, prompt, purpose="answer")
-        rendered_answer = answer
-        evidence_payload = None
-        if effective_mode == "evidence":
-            evidence_resp = evidence.build_response(query=text, llm_answer=answer, retrieved=search_results, high_risk=high_risk)
-            rendered_answer = evidence.render_markdown(evidence_resp)
-            evidence_payload = {
-                "status": evidence_resp.status,
-                "citations": evidence_resp.citations,
-                "needs_manual_check": evidence_resp.needs_manual_check,
-            }
-        assistant_msg = chat_db.save_assistant_message(
-            session.id,
-            rendered_answer,
-            metadata={
-                **(metadata or {}),
-                "topic_id": str(topic.id),
-                "effective_mode": effective_mode,
-                "high_risk": high_risk,
-                "evidence": evidence_payload,
-            },
-        )
-        analytics.track(
-            user_id=user.id,
-            topic_id=topic.id,
-            session_id=session.id,
-            event_name="activation_first_answer",
-            properties={"effective_mode": effective_mode, "high_risk": high_risk},
-        )
-        await _send_ai_answer(message, rendered_answer)
-        await _try_ingest_answer(
-            memory,
-            db=db,
-            user_id=user.id,
-            topic_id=topic.id,
-            source_message_id=assistant_msg.id,
-            answer=rendered_answer,
-            title="Ответ",
-            kind="answer",
-        )
-    except SQLAlchemyError:
-        ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "db"})
-        ErrorEventRepo(db).add(
-            user_id=user.id,
-            scope="telegram",
-            category="telegram_pipeline_db_error",
-            details={"topic_id": str(topic.id), "message_id": message.message_id},
-        )
-        logger.exception("db_error_in_pipeline", extra={"event": "telegram_pipeline_error", "error_category": "db_error"})
-        await message.answer("Ошибка базы данных. Попробуйте чуть позже.")
-    except RuntimeError:
-        ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "provider"})
-        ErrorEventRepo(db).add(
-            user_id=user.id,
-            scope="telegram",
-            category="telegram_pipeline_provider_error",
-            details={"topic_id": str(topic.id), "message_id": message.message_id},
-        )
-        logger.exception("provider_runtime_error", extra={"event": "telegram_pipeline_error", "error_category": "provider_error"})
-        await message.answer(_provider_error_text())
-    except Exception as exc:
-        if "quota" in str(exc).lower() or "429" in str(exc):
-            await message.answer(_quota_error_text())
+            safety = safety_gate.check(text)
+            if not safety.allowed:
+                warn = safety.warning or "Недостаточно данных."
+                if safety.clarifying_questions:
+                    warn = f"{warn}\n\n" + "\n".join(f"- {q}" for q in safety.clarifying_questions)
+                await message.answer(warn)
+                return
+            memory = MemoryService(MemoryRepo(db), topic_repo=TopicRepo(db), embedder=llm_router, chunk_repo=DocumentChunkRepo(db))
+            search_results = await memory.search(db=db, user_id=user.id, query=text, current_topic_id=topic.id, top_k=5, cross_topic=True)
+            memory_chunks = [
+                f"[source={item.source_title or 'memory'} doc={item.document_id or '-'} chunk={item.chunk_id or item.memory_id or '-'}] {item.snippet}"
+                for item in search_results
+            ]
+            subject = SubjectRepo(db).get_by_id(topic.subject_id)
+            history_rows = MessageRepo(db).recent_for_session(session.id, limit=6)
+            high_risk = evidence.is_high_risk(text, getattr(safety, "risk_tags", []))
+            if high_risk:
+                analytics.track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    session_id=session.id,
+                    event_name="high_risk_query",
+                    properties={"risk_tags": getattr(safety, "risk_tags", [])},
+                )
+            effective_mode = "evidence" if (session.mode == "evidence" or high_risk) else session.mode
+            preferred_sources = evidence.preferred_sources(region=profile["region"], species_focus=profile["species_focus"])
+            prompt = prompt_manager.build(
+                mode=effective_mode,
+                subject=subject.slug if subject else "general",
+                user_message=text,
+                memory_chunks=memory_chunks,
+                session_history=[f"{row.role}: {row.content[:200]}" for row in history_rows],
+                region=profile["region"],
+                species_focus=profile["species_focus"],
+                evidence_preference=", ".join(preferred_sources) if preferred_sources else None,
+                safety_warning=safety.warning,
+            )
+            prompt += "\n\nEVIDENCE_POLICY:\n- Используй только факты, подтверждённые блоком RETRIEVED_MEMORY.\n- Не делай уверенных утверждений, если в памяти нет подтверждения.\n- Для каждого клинического тезиса добавляй ссылку вида [doc/chunk]."
+            answer = await llm_router.generate(db, user.id, prompt, purpose="answer")
+            rendered_answer = answer
+            evidence_payload = None
+            if effective_mode == "evidence":
+                evidence_resp = evidence.build_response(query=text, llm_answer=answer, retrieved=search_results, high_risk=high_risk)
+                rendered_answer = evidence.render_markdown(evidence_resp)
+                evidence_payload = {
+                    "status": evidence_resp.status,
+                    "citations": evidence_resp.citations,
+                    "needs_manual_check": evidence_resp.needs_manual_check,
+                }
+            assistant_msg = chat_db.save_assistant_message(
+                session.id,
+                rendered_answer,
+                metadata={
+                    **(metadata or {}),
+                    "topic_id": str(topic.id),
+                    "effective_mode": effective_mode,
+                    "high_risk": high_risk,
+                    "evidence": evidence_payload,
+                },
+            )
+            analytics.track(
+                user_id=user.id,
+                topic_id=topic.id,
+                session_id=session.id,
+                event_name="activation_first_answer",
+                properties={"effective_mode": effective_mode, "high_risk": high_risk},
+            )
+            await _send_ai_answer(message, rendered_answer)
+            await _try_ingest_answer(
+                memory,
+                db=db,
+                user_id=user.id,
+                topic_id=topic.id,
+                source_message_id=assistant_msg.id,
+                answer=rendered_answer,
+                title="Ответ",
+                kind="answer",
+            )
             return
-        ErrorEventRepo(db).add(
-            user_id=user.id,
-            scope="telegram",
-            category="telegram_pipeline_unexpected_error",
-            details={"topic_id": str(topic.id), "message_id": message.message_id, "error": str(exc)},
-        )
-        ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "unexpected"})
-        logger.exception("pipeline_failed", extra={"event": "telegram_pipeline_error", "error_category": "telegram_error"})
-        await message.answer("Временная ошибка обработки. Попробуйте ещё раз.")
-    finally:
-        db.close()
+        except SQLAlchemyError as exc:
+            db.rollback()
+            if isinstance(exc, OperationalError) and attempt == 0:
+                logger.warning("db_error_retrying_once", extra={"event": "telegram_pipeline_db_retry", "error_category": "db_error"})
+                await asyncio.sleep(2)
+                continue
+            ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "db"})
+            ErrorEventRepo(db).add(
+                user_id=user.id,
+                scope="telegram",
+                category="telegram_pipeline_db_error",
+                details={"topic_id": str(topic.id), "message_id": message.message_id},
+            )
+            logger.exception("db_error_in_pipeline", extra={"event": "telegram_pipeline_error", "error_category": "db_error"})
+            await message.answer("Ошибка базы данных. Попробуйте чуть позже.")
+            return
+        except RuntimeError:
+            ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "provider"})
+            ErrorEventRepo(db).add(
+                user_id=user.id,
+                scope="telegram",
+                category="telegram_pipeline_provider_error",
+                details={"topic_id": str(topic.id), "message_id": message.message_id},
+            )
+            logger.exception("provider_runtime_error", extra={"event": "telegram_pipeline_error", "error_category": "provider_error"})
+            await message.answer(_provider_error_text())
+            return
+        except Exception as exc:
+            if "quota" in str(exc).lower() or "429" in str(exc):
+                await message.answer(_quota_error_text())
+                return
+            ErrorEventRepo(db).add(
+                user_id=user.id,
+                scope="telegram",
+                category="telegram_pipeline_unexpected_error",
+                details={"topic_id": str(topic.id), "message_id": message.message_id, "error": str(exc)},
+            )
+            ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "unexpected"})
+            logger.exception("pipeline_failed", extra={"event": "telegram_pipeline_error", "error_category": "telegram_error"})
+            await message.answer("Временная ошибка обработки. Попробуйте ещё раз.")
+            return
+        finally:
+            db.close()
 
 
 @router.message(Command("start"))

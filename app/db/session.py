@@ -15,11 +15,11 @@ def get_engine():
     return create_engine(settings.database_url, pool_pre_ping=True)
 
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False)
+ENGINE = get_engine()
+SessionLocal = sessionmaker(bind=ENGINE, autocommit=False, autoflush=False)
 
 
 def new_session():
-    SessionLocal.configure(bind=get_engine())
     return SessionLocal()
 
 
