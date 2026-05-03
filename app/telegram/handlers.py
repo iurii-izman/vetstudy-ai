@@ -551,7 +551,8 @@ async def cmd_start(message: Message):
         "1) /create_default_topics\n"
         "2) или /bind_topic <slug_or_name>\n"
         "3) задайте вопрос в topic\n"
-        "4) учёба: /cards -> /review -> /quiz\n"
+        "4) дневной маршрут: /today\n"
+        "5) учёба: /cards -> /review -> /quiz\n"
         "Подсказки: /help",
     )
 
@@ -563,7 +564,8 @@ async def cmd_help(message: Message):
     await message.answer(
         "Онбординг:\n/start\n/status\n/topics\n/create_default_topics\n/bind_topic <slug_or_name>\n\n"
         "Сессия:\n/new\n/mode\n/evidence\n/save\n/search\n/summary\n/profile\n\n"
-        "Обучение:\n/cards\n/review\n/quiz\n/export\n\n"
+        "Обучение:\n/today\n/cards\n/review\n/quiz\n/export\n\n"
+        "Клинические кейсы:\n/case — выбрать виртуальный кейс\n/case_answer — отправить анализ на оценку\n\n"
         "Система:\n/docs\n/help",
     )
 
@@ -998,6 +1000,8 @@ async def cmd_cards(message: Message, command: CommandObject):
                 source_message_id=source_message_id,
                 front=item["front"],
                 back=item["back"],
+                card_type=item.get("card_type", "fact"),
+                needs_manual_check=item.get("needs_manual_check", False),
                 tags=sorted(set([*item.get("tags", []), f"difficulty:{item.get('difficulty', 'medium')}"])),
                 due_at=datetime.now(UTC),
                 ease=2.5,
@@ -1072,12 +1076,248 @@ async def cmd_review(message: Message):
             await message.answer("Сейчас нет карточек к повторению.")
             return
         card = due_cards[0]
+        hint = "\n\n💡 Подсказка: разбить карточку." if "leech" in (card.tags or []) else ""
         await message.answer(
-            f"Карточка:\n{card.front}\n\nОтвет скрыт. Нажмите «Показать ответ».",
+            f"Карточка:\n{card.front}\n\nОтвет скрыт. Нажмите «Показать ответ».{hint}",
             reply_markup=_build_review_keyboard(str(card.id)),
         )
     finally:
         db.close()
+
+
+@router.message(Command("today"))
+async def cmd_today(message: Message):
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        chat_db = ChatDBService(db)
+        user = chat_db.ensure_user(message.from_user.id, message.from_user.full_name if message.from_user else None)
+        topic = chat_db.get_topic_for_chat_thread(message.chat.id, message.message_thread_id)
+        if not topic or not topic.subject_id:
+            await message.answer(_topic_required_text(message.message_thread_id))
+            return
+        route = LearningService().build_daily_route(db=db, user_id=user.id, topic_id=topic.id)
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            topic_id=topic.id,
+            event_name="learning_route_opened",
+            properties={"used_fallback": route.used_fallback, "due_count": route.due_count},
+        )
+        lines = [
+            "Маршрут на 15-30 минут:",
+            f"1) Мини-кейс: {route.mini_case}",
+            f"2) Препарат/риск: {route.drug_risk}",
+            f"3) Карточки к сроку: {route.due_count}",
+            "4) Повтори 3 карточки:",
+        ]
+        for idx, card_front in enumerate(route.review_cards[:3], start=1):
+            lines.append(f"   {idx}. {card_front}")
+        lines.append(f"5) Reflection: {route.reflection_question}")
+        await message.answer("\n".join(lines))
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────
+# /case  –  virtual clinical case training flow
+# ──────────────────────────────────────────────
+from app.cases import CASES, CASE_EDUCATIONAL_DISCLAIMER, get_case_by_id  # noqa: E402
+
+
+def _case_select_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=c["title"], callback_data=_callback_data("case_select", c["id"]))]
+        for c in CASES
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _case_answer_keyboard(case_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Отправить анализ", callback_data=_callback_data("case_submit", case_id))],
+            [InlineKeyboardButton(text="🔄 Другой кейс", callback_data=_callback_data("case_list", ""))],
+        ]
+    )
+
+
+def _get_user_case_id(user) -> str | None:
+    return (user.settings or {}).get("active_case_id")
+
+
+def _set_user_case_id(user, case_id: str | None) -> None:
+    settings = dict(user.settings or {})
+    if case_id is None:
+        settings.pop("active_case_id", None)
+        settings.pop("active_case_answer", None)
+    else:
+        settings["active_case_id"] = case_id
+    user.settings = settings
+
+
+@router.message(Command("case"))
+async def cmd_case(message: Message, command: CommandObject):
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        user = UserRepo(db).get_or_create(
+            message.from_user.id,
+            message.from_user.full_name if message.from_user else None,
+        )
+        args = (command.args or "").strip()
+        if args:
+            # Direct selection by id
+            case = get_case_by_id(args)
+            if not case:
+                await message.answer(f"Кейс '{args}' не найден. Используй /case без аргументов для списка.")
+                return
+            _set_user_case_id(user, case["id"])
+            db.commit()
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                event_name="case_started",
+                properties={"case_id": case["id"], "case_title": case["title"]},
+            )
+            text = (
+                f"<b>{case['title']}</b>\n\n"
+                f"{case['description']}"
+                f"{CASE_EDUCATIONAL_DISCLAIMER}\n\n"
+                "📝 Напиши свой анализ кейса в следующем сообщении, затем отправь /case_answer."
+            )
+            await _answer_telegram_html(message, text, reply_markup=_case_answer_keyboard(case["id"]))
+        else:
+            await message.answer(
+                "Выбери учебный кейс:",
+                reply_markup=_case_select_keyboard(),
+            )
+    finally:
+        db.close()
+
+
+@router.message(Command("case_answer"))
+async def cmd_case_answer(message: Message):
+    """Submit the student's analysis of the current case for Socratic evaluation."""
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        user = UserRepo(db).get_or_create(
+            message.from_user.id,
+            message.from_user.full_name if message.from_user else None,
+        )
+        case_id = _get_user_case_id(user)
+        if not case_id:
+            await message.answer(
+                "Нет активного кейса. Выбери кейс через /case сначала."
+            )
+            return
+        case = get_case_by_id(case_id)
+        if not case:
+            _set_user_case_id(user, None)
+            db.commit()
+            await message.answer("Активный кейс не найден. Выбери кейс через /case.")
+            return
+        # Get the student's answer from the message text (strip the command prefix)
+        raw = (message.text or "").strip()
+        student_answer = raw.removeprefix("/case_answer").strip()
+        if not student_answer:
+            await message.answer(
+                "Напиши свой анализ после команды, например:\n"
+                "<code>/case_answer Я запрошу ОАК, биохимию, рентген. Мои дифференциалы: ...</code>",
+                parse_mode=TELEGRAM_HTML_PARSE_MODE,
+            )
+            return
+
+        await _send_typing(message)
+        quota = QuotaGuard(get_settings()).check_user_and_global(db, user)
+        if not quota.allowed:
+            await message.answer(quota.message or "Лимит исчерпан.")
+            return
+
+        prompt = prompt_manager.build_case_eval(
+            case_title=case["title"],
+            case_description=case["description"],
+            rubric=case["rubric"],
+            student_answer=student_answer,
+        )
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            event_name="case_submitted",
+            properties={"case_id": case_id, "answer_len": len(student_answer)},
+        )
+        answer = await llm_router.generate(db, user.id, prompt, purpose="case_eval")
+
+        # Save to session if possible
+        topic = TopicRepo(db).get_by_chat_thread(message.chat.id, message.message_thread_id)
+        if topic and topic.subject_id:
+            chat_db = ChatDBService(db)
+            session = SessionRepo(db).get_active(user.id, topic.id) or SessionRepo(db).new_active(user.id, topic.id, mode="practical")
+            chat_db.save_user_message(session.id, f"/case_answer {student_answer}", message.message_id)
+            assistant_msg = chat_db.save_assistant_message(session.id, answer, metadata={"case_id": case_id, "topic_id": str(topic.id)})
+            memory = MemoryService(MemoryRepo(db), topic_repo=TopicRepo(db), embedder=llm_router, chunk_repo=DocumentChunkRepo(db))
+            await _try_ingest_answer(
+                memory,
+                db=db,
+                user_id=user.id,
+                topic_id=topic.id,
+                source_message_id=assistant_msg.id,
+                answer=answer,
+                title=f"Разбор: {case['title']}",
+                kind="answer",
+            )
+
+        # Clear active case after submission
+        _set_user_case_id(user, None)
+        db.commit()
+
+        fb_keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="👍", callback_data=_callback_data("case_fb", "up")),
+                    InlineKeyboardButton(text="👎", callback_data=_callback_data("case_fb", "down")),
+                ],
+                [
+                    InlineKeyboardButton(text="🔄 Ещё кейс", callback_data=_callback_data("case_list", "")),
+                    InlineKeyboardButton(text="🧠 Сделать карточки", callback_data=_callback_data("cards")),
+                ],
+            ]
+        )
+        await _send_ai_answer(message, answer, with_keyboard=False)
+        if message.answers:  # type: ignore[attr-defined]
+            pass
+        try:
+            await message.answer(
+                "⚠️ <i>Это учебная обратная связь, а не клиническое заключение. "
+                "Для реального животного — очная консультация ветеринара.</i>",
+                parse_mode=TELEGRAM_HTML_PARSE_MODE,
+                reply_markup=fb_keyboard,
+            )
+        except Exception:
+            pass
+    except RuntimeError:
+        ErrorEventRepo(db).add(
+            user_id=user.id,
+            scope="telegram",
+            category="case_eval_provider_error",
+            details={"case_id": case_id},
+        )
+        await message.answer(_provider_error_text())
+    except Exception as exc:
+        if "quota" in str(exc).lower() or "429" in str(exc):
+            await message.answer(_quota_error_text())
+        else:
+            ErrorEventRepo(db).add(
+                user_id=user.id,
+                scope="telegram",
+                category="case_eval_unexpected_error",
+                details={"case_id": case_id, "error": str(exc)},
+            )
+            await message.answer("Временная ошибка. Попробуйте ещё раз.")
+    finally:
+        db.close()
+
 
 
 @router.message(Command("export"))
@@ -1186,6 +1426,68 @@ async def on_ai_action(query: CallbackQuery):
         finally:
             db.close()
         return
+    # ── Case callbacks ──────────────────────────────────────────────────────
+    if parsed.action == "case_select":
+        case_id = parsed.payload
+        case = get_case_by_id(case_id)
+        if not case:
+            if query.message:
+                await query.message.answer("Кейс не найден.")
+            return
+        db = new_session()
+        try:
+            user = UserRepo(db).get_or_create(
+                query.from_user.id,
+                query.from_user.full_name if query.from_user else None,
+            )
+            _set_user_case_id(user, case["id"])
+            db.commit()
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                event_name="case_started",
+                properties={"case_id": case["id"], "case_title": case["title"]},
+            )
+        finally:
+            db.close()
+        if query.message:
+            text = (
+                f"<b>{case['title']}</b>\n\n"
+                f"{case['description']}"
+                f"{CASE_EDUCATIONAL_DISCLAIMER}\n\n"
+                "📝 Напиши свой анализ кейса, затем отправь /case_answer."
+            )
+            try:
+                await query.message.edit_text(text, parse_mode=TELEGRAM_HTML_PARSE_MODE,
+                                              reply_markup=_case_answer_keyboard(case["id"]))
+            except Exception:
+                await query.message.answer(text, parse_mode=TELEGRAM_HTML_PARSE_MODE,
+                                           reply_markup=_case_answer_keyboard(case["id"]))
+        return
+    if parsed.action == "case_list":
+        if query.message:
+            try:
+                await query.message.edit_text("Выбери учебный кейс:", reply_markup=_case_select_keyboard())
+            except Exception:
+                await query.message.answer("Выбери учебный кейс:", reply_markup=_case_select_keyboard())
+        return
+    if parsed.action == "case_fb":
+        db = new_session()
+        try:
+            user = UserRepo(db).get_or_create(
+                query.from_user.id,
+                query.from_user.full_name if query.from_user else None,
+            )
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                event_name="case_feedback",
+                properties={"sentiment": parsed.payload},  # "up" or "down"
+            )
+        finally:
+            db.close()
+        if query.message:
+            await query.message.answer("Спасибо за обратную связь! Используй /case для следующего кейса.")
+        return
+    # ── General feedback ────────────────────────────────────────────────────
     if parsed.action in {"fb_up", "fb_down", "fb_error"}:
         if not query.message:
             return
@@ -1258,7 +1560,7 @@ async def on_ai_action(query: CallbackQuery):
                     tags=["cards", "answer"],
                     source_message_id=str(last.id),
                 )
-                cards = [Flashcard(user_id=user.id, topic_id=topic.id, source_message_id=last.id, front=x["front"], back=x["back"], tags=x["tags"], due_at=datetime.now(UTC), ease=2.5, interval_days=1) for x in raw_cards]
+                cards = [Flashcard(user_id=user.id, topic_id=topic.id, source_message_id=last.id, front=x["front"], back=x["back"], card_type=x.get("card_type", "fact"), needs_manual_check=x.get("needs_manual_check", False), tags=x.get("tags", []), due_at=datetime.now(UTC), ease=2.5, interval_days=1) for x in raw_cards]
                 if not cards:
                     await query.message.answer("Не удалось собрать валидные карточки.")
                     return

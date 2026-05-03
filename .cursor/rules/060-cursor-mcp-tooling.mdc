@@ -1,0 +1,15 @@
+---
+description: Cursor and MCP tooling rules for safe IDE acceleration.
+globs: [".cursor/**/*", "docs/ai/CURSOR_MCP_SETUP.md", "docs/ai/NOTEBOOKLM_PROJECT_BRIEF.md", "docs/ai/NOTEBOOKLM_WORKFLOW.md", "docs/ai/AUTOPILOT_HANDOFF.md", "docs/ai/AUTOPILOT_NEXT_BLOCKS.md", "scripts/autopilot_context.ps1", ".github/copilot-instructions.md"]
+alwaysApply: false
+---
+
+# Cursor And MCP Tooling
+
+- Prefer project rules in `.cursor/rules/*.mdc` for stable repository memory. Keep always-on rules short and move domain-specific detail into glob-scoped rules.
+- Do not add an active `.cursor/mcp.json` with secrets. If MCP is configured, use environment-variable interpolation and document the expected permissions.
+- MCP tools can execute actions outside the repository. Keep human approval enabled for write, deploy, database, messaging, browser, or external API tools.
+- Prefer read-only MCP access for GitHub, Sentry, Postgres, and knowledge sources until the workflow is proven.
+- Cursor already has workspace file access, so a broad filesystem MCP server is usually unnecessary and increases secret-exposure risk.
+- If adding an MCP server, review its package/source, pin versions where practical, constrain roots and scopes, and exclude `.env`, backups, raw uploads, local DB data, and audit artifacts.
+- For NotebookLM, prefer curated source packs and Google Docs/Markdown upload over direct write-capable automation. Never upload private Codex logs or secret-bearing files.

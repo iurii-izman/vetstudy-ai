@@ -35,6 +35,8 @@ describe('App', () => {
       if (u.includes('/admin/feedback')) return { ok: true, json: async () => [{ id: 'f1', feedback_type: 'down', status: 'new' }] }
       if (u.includes('/admin/costs')) return { ok: true, json: async () => [{ user_id: 'u1', provider: 'mock', model: 'm1', calls: 1, cost_usd: 0.1 }] }
       if (u.includes('/topics/graph')) return { ok: true, json: async () => ({ nodes: [{ id: 'n1', title: 'Surgery' }], edges: [] }) }
+      if (u.includes('/admin/evidence/source-coverage')) return { ok: true, json: async () => ({ missing: true }) }
+      if (u.includes('/admin/evidence/needs-check')) return { ok: true, json: async () => [] }
       return { ok: true, json: async () => ({}) }
     })
 
@@ -63,8 +65,10 @@ describe('App', () => {
       if (u.includes('/flashcards')) return { ok: true, json: async () => [{ id: 'c1', front: 'Q', back: 'A', interval_days: 1 }] }
       if (u.includes('/admin/errors')) return { ok: true, json: async () => [{ id: 'e1', category: 'provider_timeout' }] }
       if (u.includes('/admin/feedback')) return { ok: true, json: async () => [{ id: 'f1', feedback_type: 'down', status: 'new' }] }
-      if (u.includes('/admin/costs')) return { ok: true, json: async () => [{ user_id: 'u1', provider: 'mock', model: 'm1', calls: 1, cost_usd: 0.1 }] }
+      if (u.includes('/admin/costs')) return { ok: true, json: async () => [{ user_id: 'u1', provider: 'mock', model: 'm1', calls: 1, cost_cost: 0.1 }] }
       if (u.includes('/topics/graph')) return { ok: true, json: async () => ({ nodes: [{ id: 'n1', title: 'Surgery' }], edges: [] }) }
+      if (u.includes('/admin/evidence/source-coverage')) return { ok: true, json: async () => ({ missing: true }) }
+      if (u.includes('/admin/evidence/needs-check')) return { ok: true, json: async () => [] }
       return { ok: true, json: async () => ({}) }
     })
     render(
@@ -78,7 +82,7 @@ describe('App', () => {
     await userEvent.click(screen.getByText('Reveal'))
     await screen.findByText('A')
     await userEvent.click(screen.getByText('Admin'))
-    await screen.findByText('Admin errors')
-    await screen.findByText('Negative feedback')
+    await screen.findByText('Analytics & Health')
+    await screen.findByText('Open negative feedback')
   })
 })

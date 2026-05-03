@@ -264,6 +264,45 @@ async def test_mode_evidence_allowed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_today_command_builds_route_and_tracks_event(monkeypatch):
+    tracked = []
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={}),
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1"),
+        ),
+    )
+    monkeypatch.setattr(
+        handlers,
+        "ProductAnalyticsService",
+        lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)),
+    )
+    monkeypatch.setattr(
+        handlers.LearningService,
+        "build_daily_route",
+        lambda self, **kwargs: SimpleNamespace(
+            mini_case="Собака с диареей: дифференциалы?",
+            drug_risk="НПВС у кошек: check kidney and hydration.",
+            due_count=4,
+            review_cards=["Q1", "Q2", "Q3"],
+            reflection_question="Что проверишь первым?",
+            used_fallback=False,
+        ),
+    )
+    message = FakeMessage(user_id=1, text="/today")
+    await handlers.cmd_today(message)
+    assert message.answers
+    text = message.answers[0]["text"]
+    assert "Маршрут на 15-30 минут" in text
+    assert "Карточки к сроку: 4" in text
+    assert tracked and tracked[0]["event_name"] == "learning_route_opened"
+
+
+@pytest.mark.asyncio
 async def test_profile_command_updates_settings(monkeypatch):
     user = SimpleNamespace(id="u-1", settings={})
     monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
@@ -427,3 +466,27 @@ async def test_callback_save_creates_note(monkeypatch):
     assert saved
     assert saved[0]["kind"] == "note"
     assert any("Сохранено" in item["text"] for item in query.message.answers)
+
+@pytest.mark.asyncio
+async def test_review_shows_leech_hint(monkeypatch):
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={}),
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1"),
+        ),
+    )
+    monkeypatch.setattr(
+        handlers,
+        "FlashcardRepo",
+        lambda db: SimpleNamespace(
+            list_due=lambda *a, **k: [SimpleNamespace(id="c-1", front="Question", tags=["leech"])]
+        ),
+    )
+    message = FakeMessage(user_id=1, text="/review")
+    await handlers.cmd_review(message)
+    assert message.answers
+    assert "разбить карточку" in message.answers[0]["text"]

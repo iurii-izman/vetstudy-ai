@@ -179,6 +179,8 @@ class Flashcard(Base):
     topic_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("topics.id", ondelete="CASCADE"), nullable=True)
     front: Mapped[str] = mapped_column(Text, nullable=False)
     back: Mapped[str] = mapped_column(Text, nullable=False)
+    card_type: Mapped[str] = mapped_column(String(32), default="fact", nullable=False)
+    needs_manual_check: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     source_message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)
     tags: Mapped[list[str]] = mapped_column(ARRAY(Text).with_variant(JSON, "sqlite"), default=list, nullable=False)
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

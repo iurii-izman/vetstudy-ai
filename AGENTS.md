@@ -9,6 +9,10 @@ This repository is a private-beta veterinary study assistant. Optimize for safe,
 - `docs/beta/RUNBOOK.md` for deploy and recovery.
 - `docs/beta/RELEASE_CHECKLIST.md` before release work.
 - `docs/beta/CLOSED_BETA_DECISIONS.md` for product, privacy, provider, and medical-safety decisions.
+- `docs/ai/AUTOPILOT_HANDOFF.md` for current project state, session history summary, and next-work orientation.
+- `docs/ai/AUTOPILOT_NEXT_BLOCKS.md` for the current ordered autopilot task blocks and ready-to-run prompts.
+- `docs/ai/CURSOR_MCP_SETUP.md` when working in Cursor or changing MCP/tooling setup.
+- `docs/ai/NOTEBOOKLM_WORKFLOW.md` when preparing NotebookLM research sources or importing external research back into the roadmap.
 - `quality/dosage_policy_transnistria.md` for numeric dose handling.
 
 ## Hard Rules
@@ -17,6 +21,8 @@ This repository is a private-beta veterinary study assistant. Optimize for safe,
 - Do not remove safety disclaimers, allowlist checks, quota checks, or user isolation tests.
 - Do not add proprietary veterinary formulary/textbook content unless the repository owner confirms license rights.
 - High-risk veterinary answers must ask for missing patient/source data or mark `needs_manual_check`; never turn beta output into a prescription.
+- Do not add active IDE/MCP configs with real tokens, broad filesystem access, or production database write access.
+- Do not upload or paste secrets, private IDs, raw clinical records, raw uploads, backups, local DB data, generated audit artifacts, or private Codex logs into NotebookLM.
 
 ## Change Discipline
 

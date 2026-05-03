@@ -21,7 +21,8 @@ def test_dosage_with_weight_allowed():
 def test_acceptance_paracetamol_cat_warning():
     gate = SafetyGate()
     result = gate.check("парацетамол кошке")
-    assert result.action == "answer_with_warning"
+    assert result.action == "ask_clarifying_questions"
+    assert result.allowed is False
     assert "paracetamol_in_cats" in result.risk_tags
 
 
@@ -126,8 +127,56 @@ def test_dosage_reordered_skolko_dat_detected():
 def test_paracetamol_kot_detects_cat_warning():
     gate = SafetyGate()
     result = gate.check("Кот съел таблетку парацетамола")
-    assert result.action == "answer_with_warning"
+    assert result.action == "ask_clarifying_questions"
+    assert result.allowed is False
     assert "paracetamol_in_cats" in result.risk_tags
+
+
+def test_emergency_russian_seizure_phrase_escalates():
+    gate = SafetyGate()
+    result = gate.check("Кошка в судорогах 5 минут")
+    assert result.intent == "emergency_or_red_flag"
+    assert result.action == "refuse_emergency_instruction_and_triage"
+    assert result.allowed is False
+
+
+def test_dosage_russian_inflection_detected():
+    gate = SafetyGate()
+    result = gate.check("Дай дозу мелоксикама кошке")
+    assert result.intent == "dosage_request"
+    assert result.action == "ask_clarifying_questions"
+    assert result.allowed is False
+
+
+def test_toxicology_chocolate_ingestion_detected():
+    gate = SafetyGate()
+    result = gate.check("Собака съела шоколад")
+    assert result.intent == "toxicology"
+    assert result.action == "ask_clarifying_questions"
+    assert result.allowed is False
+    assert "toxic_exposure_common" in result.risk_tags
+
+
+def test_toxicology_xylitol_and_raisin_detected():
+    gate = SafetyGate()
+    xylitol = gate.check("Собака съела ксилит")
+    raisin = gate.check("Собака съела изюм")
+    assert xylitol.intent == "toxicology"
+    assert raisin.intent == "toxicology"
+
+
+def test_toxicology_permethrin_for_cat_detected():
+    gate = SafetyGate()
+    result = gate.check("Кошка слизала перметрин")
+    assert result.intent == "toxicology"
+    assert result.action == "ask_clarifying_questions"
+
+
+def test_interaction_phrase_without_plus_detected():
+    gate = SafetyGate()
+    result = gate.check("Есть ли взаимодействия у гентамицина при ХБП?")
+    assert result.intent == "drug_interaction"
+    assert "aminoglycoside_kidney_risk" in result.risk_tags
 
 
 def test_dosage_missing_route_asks():

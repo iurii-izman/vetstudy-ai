@@ -1,0 +1,23 @@
+---
+description: Always-on VetStudy AI project guardrails and start routine.
+alwaysApply: true
+---
+
+# VetStudy AI Project Rules
+
+- This repo is a private-beta, Telegram-first veterinary study assistant for one trusted Russian-speaking veterinary specialist returning to practice after a long break.
+- Treat the product as educational support, not diagnosis, prescription, dosage authorization, or a treatment plan for real animals.
+- Before planning new work, read `AGENTS.md`, `docs/ai/AUTOPILOT_HANDOFF.md`, `docs/ai/AUTOPILOT_NEXT_BLOCKS.md`, and the narrow files for the task.
+- Keep changes small, auditable, and aligned with existing FastAPI, aiogram, SQLAlchemy, Alembic, Redis Streams, and React/Vite patterns.
+- Never introduce real secrets, private Telegram IDs, raw uploads, local DB data, backups, generated quality-audit artifacts, or proprietary veterinary source content.
+- Preserve safety disclaimers, allowlist checks, quota checks, user isolation, evidence/manual-check behavior, and medical-safety tests.
+- Inspect `git status` and relevant diffs before editing. Work with unrelated existing changes; do not revert them unless explicitly asked.
+- For backend, safety, prompts, migrations, privacy, router, and tests, prefer `GPT-5.3-Codex` with medium reasoning. Use high reasoning only for difficult migrations, cross-module refactors, or safety failures.
+- `GPT-5.4-mini` with medium reasoning is acceptable for docs, small UI polish, and simple frontend panels. Do not use a mini model for dosage policy, veterinary safety, auth, privacy deletion, or schema changes.
+
+## Default Checks
+
+- Narrow backend change: run the relevant `pytest` file(s) and `python -m ruff check .`.
+- Safety, prompt, validator, privacy, router, or migration change: add or update tests.
+- Frontend change: run `cd web; npm test; npm run build`.
+- Release or operational change: update README, runbook, checklist, or `.env.example` as needed.

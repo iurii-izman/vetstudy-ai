@@ -1,0 +1,79 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Autopilot: Context",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts/autopilot_context.ps1"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Backend: Ruff",
+      "type": "shell",
+      "command": "python -m ruff check .",
+      "problemMatcher": []
+    },
+    {
+      "label": "Backend: Pytest",
+      "type": "shell",
+      "command": "python -m pytest -q",
+      "problemMatcher": []
+    },
+    {
+      "label": "Backend: Alembic Head",
+      "type": "shell",
+      "command": "alembic upgrade head",
+      "problemMatcher": []
+    },
+    {
+      "label": "Beta: Preflight",
+      "type": "shell",
+      "command": "python scripts/preflight_check.py --db --schema",
+      "problemMatcher": []
+    },
+    {
+      "label": "Beta: Quality Audit 10",
+      "type": "shell",
+      "command": "python scripts/quality_audit.py --limit 10 --delay-s 0",
+      "problemMatcher": []
+    },
+    {
+      "label": "Web: Test",
+      "type": "shell",
+      "command": "npm test",
+      "options": {
+        "cwd": "${workspaceFolder}/web"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Web: Build",
+      "type": "shell",
+      "command": "npm run build",
+      "options": {
+        "cwd": "${workspaceFolder}/web"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Full: Release Checks",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Backend: Ruff",
+        "Backend: Pytest",
+        "Backend: Alembic Head",
+        "Web: Test",
+        "Web: Build"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}
+

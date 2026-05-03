@@ -1,0 +1,23 @@
+---
+description: Backend architecture rules for FastAPI, aiogram, SQLAlchemy, Alembic, scripts, and tests.
+globs: ["app/**/*.py", "alembic/**/*", "scripts/**/*.py", "pyproject.toml", "requirements*.lock"]
+alwaysApply: false
+---
+
+# Backend Architecture
+
+- Keep handlers thin. Route Telegram and HTTP work through services, repositories, validators, and router/provider abstractions already present in the repo.
+- Use Alembic migrations for schema changes. Do not reintroduce startup `create_all()` schema creation.
+- Preserve user isolation in every repository, search, memory, card, feedback, export, deletion, and admin path.
+- Keep provider access behind the existing LLM router/provider layer. Do not call OpenAI, Gemini, OpenRouter, or Groq directly from handlers.
+- Use structured parsers and typed models when possible instead of ad hoc string manipulation.
+- Keep Redis Streams document jobs idempotent and observable. Do not store raw uploaded content longer than the documented private-beta policy allows.
+- Update tests when changing security, privacy, quota, prompt, safety, router, validator, migration, or worker behavior.
+
+## Useful Checks
+
+```powershell
+python -m ruff check .
+python -m pytest -q
+alembic upgrade head
+```

@@ -1,0 +1,24 @@
+---
+description: Veterinary safety rules for prompts, validators, audit fixtures, and high-risk Russian input.
+globs: ["app/ai/**/*.py", "app/tests/test_safety_gate.py", "app/tests/test_validators.py", "app/tests/test_quality_audit_pipeline.py", "scripts/quality_audit.py", "quality/**/*", "docs/beta/CLOSED_BETA_DECISIONS.md", "quality/dosage_policy_transnistria.md"]
+alwaysApply: false
+---
+
+# Veterinary Safety
+
+- High-risk veterinary answers must ask for missing patient/source data or mark `needs_manual_check`; never convert beta output into a prescription.
+- Numeric dosage handling must follow `quality/dosage_policy_transnistria.md`. Require species, weight, age or life stage, clinical context, contraindications, route, formulation, and source/label check before any dose-like guidance.
+- Preserve educational-only wording for real animals. The assistant can explain reasoning and next questions, but must not authorize treatment.
+- Treat Russian free-form input as messy clinical chat. Normalize wording and cover realistic forms such as `дозу`, `судорогах`, `съела`, `шоколад`, `изюм`, `ксилит`, `лук`, `чеснок`, `перметрин`, `ХБП`, `ХПН`, and `почечная недостаточность`.
+- Emergency/toxicology/red-flag cases should trigger triage language and clarification, not a normal low-risk educational answer.
+- Interaction and contraindication questions matter even without a `+` symbol. Watch for combinations like aminoglycosides with kidney disease, NSAIDs in cats, NSAID plus steroid, pregnancy/lactation, pediatric/geriatric animals, and liver or renal disease.
+- When expanding rules, add focused regression tests in `app/tests/test_safety_gate.py` and quality-audit tests in `app/tests/test_quality_audit_pipeline.py`.
+- Do not add proprietary formulary or textbook content unless the owner confirms license rights.
+
+## Useful Checks
+
+```powershell
+python -m pytest app/tests/test_safety_gate.py app/tests/test_validators.py app/tests/test_quality_audit_pipeline.py -q
+python scripts/quality_audit.py --limit 10 --delay-s 0
+python -m ruff check .
+```

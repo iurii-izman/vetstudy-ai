@@ -283,33 +283,55 @@ function ReviewQueue({ cards, revealed, onReveal, onReview }) {
   )
 }
 
-function AdminView({ errors, feedback, costs, graph, analyticsSummary }) {
+function AdminView({ errors, feedback, costs, graph, analyticsSummary, stats, onUpdateFeedback }) {
+  const openFeedback = feedback.filter((x) => x.feedback_type !== 'up' && x.status !== 'resolved' && x.status !== 'ignored')
+  const highRiskCount = analyticsSummary?.behavior?.high_risk_query_count || 0
+  const zeroResultSearches = analyticsSummary?.content_gap_report?.zero_results_total || 0
+  const zeroByTopic = analyticsSummary?.content_gap_report?.zero_results_by_topic || {}
+  const weakTopics = Object.entries(zeroByTopic).map(([t, c]) => `${t} (${c})`).join(', ') || 'None'
+
   return (
     <section className="settings-view">
       <div className="settings-grid">
         <div className="settings-panel">
-          <h2>Admin errors</h2>
+          <h2>Analytics & Health</h2>
+          <dl>
+            <dt>Weak topics (zero results)</dt>
+            <dd>{weakTopics}</dd>
+            <dt>Due cards</dt>
+            <dd>{stats?.due_flashcards || 0}</dd>
+            <dt>High-risk count</dt>
+            <dd>{highRiskCount}</dd>
+            <dt>Zero-result searches</dt>
+            <dd>{zeroResultSearches}</dd>
+          </dl>
+        </div>
+        <div className="settings-panel wide">
+          <h2>Open negative feedback</h2>
           <div className="timeline">
-            {errors.slice(0, 8).map((item) => <article className="message-row assistant" key={item.id}><p>{item.category}</p></article>)}
+            {openFeedback.length === 0 ? <p className="muted">No open negative feedback.</p> : null}
+            {openFeedback.map((item) => (
+              <article className="message-row user" key={item.id}>
+                <div>
+                  <span>{item.feedback_type}</span>
+                  <time>{formatDate(item.created_at)}</time>
+                </div>
+                <p>{item.details || 'No details provided.'}</p>
+                <div className="button-row" style={{ marginTop: '8px' }}>
+                  {['new', 'in_review', 'resolved', 'ignored'].map((st) => (
+                    <button
+                      key={st}
+                      type="button"
+                      className={item.status === st ? 'primary-action' : 'secondary-action'}
+                      onClick={() => onUpdateFeedback(item.id, st)}
+                    >
+                      {st.replace('_', ' ')}
+                    </button>
+                  ))}
+                </div>
+              </article>
+            ))}
           </div>
-        </div>
-        <div className="settings-panel">
-          <h2>Negative feedback</h2>
-          <div className="timeline">
-            {feedback.filter((x) => x.feedback_type !== 'up').slice(0, 8).map((item) => <article className="message-row user" key={item.id}><p>{item.feedback_type} · {item.status}</p></article>)}
-          </div>
-        </div>
-        <div className="settings-panel wide">
-          <h2>Costs</h2>
-          <pre className="stats-json">{JSON.stringify(costs.slice(0, 12), null, 2)}</pre>
-        </div>
-        <div className="settings-panel wide">
-          <h2>Topic graph</h2>
-          <pre className="stats-json">{JSON.stringify(graph, null, 2)}</pre>
-        </div>
-        <div className="settings-panel wide">
-          <h2>Product analytics summary</h2>
-          <pre className="stats-json">{JSON.stringify(analyticsSummary || {}, null, 2)}</pre>
         </div>
       </div>
     </section>
@@ -379,7 +401,14 @@ function SummaryView({ activeTopic, notes, messages, cards }) {
   )
 }
 
-function SettingsView({ me, stats, subjects, modelSettings, onExport, onLogout, exportBusy }) {
+function SettingsView({ me, stats, subjects, modelSettings, coverage, needsCheck, onExport, onLogout, exportBusy }) {
+  const missingCoverage = coverage?.missing ? "No source file found" : `${coverage?.total_sources || 0} sources loaded`
+  const healthChecks = []
+  if (needsCheck && needsCheck.length > 0) healthChecks.push(`${needsCheck.length} answers need manual check`)
+  if (!coverage || coverage.missing || coverage.total_sources === 0) healthChecks.push("No evidence sources loaded")
+  if (healthChecks.length === 0) healthChecks.push("All systems go")
+  const healthStatus = healthChecks.join(' · ')
+
   return (
     <section className="settings-view">
       <div className="settings-grid">
@@ -407,6 +436,15 @@ function SettingsView({ me, stats, subjects, modelSettings, onExport, onLogout, 
           </div>
         </div>
         <div className="settings-panel">
+          <h2>System Health</h2>
+          <dl>
+            <dt>Go/No-Go Health</dt>
+            <dd>{healthStatus}</dd>
+            <dt>Source Coverage</dt>
+            <dd>{missingCoverage}</dd>
+          </dl>
+        </div>
+        <div className="settings-panel">
           <h2>AI routing</h2>
           <dl>
             <dt>Primary</dt>
@@ -426,7 +464,6 @@ function SettingsView({ me, stats, subjects, modelSettings, onExport, onLogout, 
           </div>
         </div>
       </div>
-      <pre className="stats-json">{JSON.stringify(stats, null, 2)}</pre>
     </section>
   )
 }
@@ -446,6 +483,8 @@ function Dashboard({ token, onLogout }) {
   const [adminCosts, setAdminCosts] = useState([])
   const [topicGraph, setTopicGraph] = useState({ nodes: [], edges: [] })
   const [analyticsSummary, setAnalyticsSummary] = useState({})
+  const [coverage, setCoverage] = useState(null)
+  const [needsCheck, setNeedsCheck] = useState([])
   const [searchQuery, setSearchQuery] = useState('')
   const [searchFacets, setSearchFacets] = useState({ kind: '', tag: '', dateFrom: '', dateTo: '' })
   const [searchResults, setSearchResults] = useState([])
@@ -476,7 +515,7 @@ function Dashboard({ token, onLogout }) {
     setError('')
     setLoadingApp(true)
     try {
-      const [topicsData, subjectsData, statsData, meData, modelData, errorsData, feedbackData, costsData, graphData, analyticsData] = await Promise.all([
+      const [topicsData, subjectsData, statsData, meData, modelData, errorsData, feedbackData, costsData, graphData, analyticsData, coverageData, checkData] = await Promise.all([
         api.topics(token),
         api.subjects(token).catch(() => []),
         api.stats(token).catch(() => EMPTY_STATS),
@@ -487,6 +526,8 @@ function Dashboard({ token, onLogout }) {
         api.adminCosts(token).catch(() => []),
         api.topicGraph(token).catch(() => ({ nodes: [], edges: [] })),
         api.adminAnalyticsSummary(token).catch(() => ({})),
+        api.sourceCoverage(token).catch(() => null),
+        api.needsCheck(token).catch(() => []),
       ])
       const safeTopics = Array.isArray(topicsData) ? topicsData : []
       setTopics(safeTopics)
@@ -499,6 +540,8 @@ function Dashboard({ token, onLogout }) {
       setAdminCosts(Array.isArray(costsData) ? costsData : [])
       setTopicGraph(graphData || { nodes: [], edges: [] })
       setAnalyticsSummary(analyticsData || {})
+      setCoverage(coverageData)
+      setNeedsCheck(Array.isArray(checkData) ? checkData : [])
       setActiveTopic((current) => current || safeTopics[0] || null)
     } catch (err) {
       setError(err.message)
@@ -622,6 +665,15 @@ function Dashboard({ token, onLogout }) {
     setSearchFacets({ kind: '', tag: '', dateFrom: '', dateTo: '' })
   }
 
+  const updateFeedbackStatus = async (id, status) => {
+    try {
+      const updated = await api.updateFeedback(token, id, { status })
+      setAdminFeedback(prev => prev.map(f => f.id === id ? { ...f, status: updated.status } : f))
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -736,7 +788,17 @@ function Dashboard({ token, onLogout }) {
           />
           <Route
             path="/admin"
-            element={<AdminView errors={adminErrors} feedback={adminFeedback} costs={adminCosts} graph={topicGraph} analyticsSummary={analyticsSummary} />}
+            element={
+              <AdminView
+                errors={adminErrors}
+                feedback={adminFeedback}
+                costs={adminCosts}
+                graph={topicGraph}
+                analyticsSummary={analyticsSummary}
+                stats={stats}
+                onUpdateFeedback={updateFeedbackStatus}
+              />
+            }
           />
           <Route
             path="/settings"
@@ -745,6 +807,8 @@ function Dashboard({ token, onLogout }) {
                 exportBusy={exportBusy}
                 me={me}
                 modelSettings={modelSettings}
+                coverage={coverage}
+                needsCheck={needsCheck}
                 onExport={exportData}
                 onLogout={onLogout}
                 stats={stats}

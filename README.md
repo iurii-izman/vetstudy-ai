@@ -162,9 +162,27 @@ Recommended:
 - `docs/beta/BETA_TEST_GUIDE.md` - manual Telegram/web test plan
 - `docs/beta/CLOSED_BETA_DECISIONS.md` - beta policy decisions and residual manual work
 - `docs/beta/KNOWN_LIMITATIONS.md` - current limits and go/no-go risks
+- `docs/ai/AUTOPILOT_HANDOFF.md` - current handoff for future Codex/IDE sessions
+- `docs/ai/AUTOPILOT_NEXT_BLOCKS.md` - current ordered prompts for the next autopilot PRs
+- `docs/ai/CURSOR_MCP_SETUP.md` - Cursor project-rules and safe MCP setup guidance
+- `docs/ai/NOTEBOOKLM_PROJECT_BRIEF.md` - curated source brief for NotebookLM research
+- `docs/ai/NOTEBOOKLM_WORKFLOW.md` - safe NotebookLM import and research workflow
+- `.cursor/rules/*.mdc` - Cursor IDE project rules for scoped AI-agent context
 - `docs/ARCHITECTURE.md` - runtime modules and data flow
 - `quality/dosage_policy_transnistria.md` - numeric dosage source policy
 - `AGENTS.md` - AI-agent guardrails for future autonomous work
+
+For a quick local orientation before starting a new agent task:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/autopilot_context.ps1
+```
+
+To create a safe one-file source pack for NotebookLM:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_notebooklm_pack.ps1
+```
 
 ## Security
 

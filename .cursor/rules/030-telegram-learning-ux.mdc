@@ -1,0 +1,22 @@
+---
+description: Telegram and learning UX rules for a friendly practical veterinary study flow.
+globs: ["app/telegram/**/*.py", "app/learning/**/*.py", "app/memory/**/*.py", "app/ai/prompts.py", "app/tests/test_telegram_handlers.py", "app/tests/test_learning_service.py", "app/tests/test_prompt_manager.py"]
+alwaysApply: false
+---
+
+# Telegram And Learning UX
+
+- Optimize for one real beta user: a licensed veterinary specialist who finished university, had about average-good marks, then spent about 5 years away from practice.
+- Answers should teach while answering: short answer, clinical logic, what to do in practice, common mistake, memory hook, and one small self-check when appropriate.
+- Prefer practical cases, triage thinking, owner-explanation phrasing, and safe next questions over dry encyclopedia style.
+- Keep Telegram output readable on a phone. Use compact sections, short bullets, and simple inline actions. Avoid huge Markdown tables and long raw JSON blocks.
+- Empty states should be useful. If there are no cards, notes, documents, or due reviews, offer a concrete next study action.
+- Inline buttons should perform real actions or clearly explain what is unavailable. Avoid placeholder UX.
+- Learning features must not memorize unsafe dose facts as prescriptions. Source-sensitive or high-risk cards should be marked for manual review.
+
+## Useful Checks
+
+```powershell
+python -m pytest app/tests/test_telegram_handlers.py app/tests/test_learning_service.py app/tests/test_prompt_manager.py -q
+python -m ruff check .
+```

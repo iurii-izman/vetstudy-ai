@@ -1,0 +1,24 @@
+---
+description: Operational, deployment, GitHub, CI, release, and documentation rules.
+globs: [".github/**/*", "Dockerfile", "docker-compose.yml", ".env.example", "README.md", "docs/beta/**/*", "docs/setup/**/*", "scripts/windows/**/*", "SECURITY.md", "CHANGELOG.md"]
+alwaysApply: false
+---
+
+# Ops And Release
+
+- Update `README.md`, `docs/beta/RUNBOOK.md`, `docs/beta/RELEASE_CHECKLIST.md`, `.env.example`, or `SECURITY.md` when deployment, environment, backup, recovery, CI, auth, or provider behavior changes.
+- Never commit `.env`, real tokens, private Telegram IDs, raw backups, local DB files, raw uploads, or generated audit artifacts.
+- Keep GitHub CI, secret scanning, dependency review, CodeQL, and security docs aligned with the actual release process.
+- Prefer reversible operational changes and clear recovery commands for the Windows private-beta environment.
+- Before release work, run the full backend, migration, frontend, preflight, and quality-audit checks documented in `AGENTS.md`.
+
+## Useful Checks
+
+```powershell
+python -m ruff check .
+python -m pytest -q
+alembic upgrade head
+cd web; npm test; npm run build
+python scripts/preflight_check.py --db --schema
+python scripts/quality_audit.py --limit 10 --delay-s 0
+```

@@ -1,0 +1,23 @@
+---
+description: React/Vite web cabinet rules for the private-beta operator interface.
+globs: ["web/src/**/*", "web/package.json", "web/vite.config.*", "web/index.html"]
+alwaysApply: false
+---
+
+# Web Cabinet
+
+- This is an operator/study cockpit, not a public SaaS landing page. Keep the interface quiet, dense, readable, and work-focused.
+- Preserve authenticated owner/admin flows and avoid exposing private Telegram IDs, raw clinical records, provider tokens, or generated audit artifacts.
+- Prefer readable sections for weak topics, due cards, feedback, high-risk counts, search misses, source coverage, AI routing, and go/no-go health over raw JSON dumps.
+- Keep UI states complete: loading, empty, error, unauthorized, and successful update states.
+- Follow the existing React/Vite style before adding new UI libraries. Avoid broad restyles unless the task is explicitly a redesign.
+- Text must fit in compact cards, tables, sidebars, and buttons on mobile and desktop.
+
+## Useful Checks
+
+```powershell
+cd web
+npm test
+npm run build
+npm audit --omit=dev
+```

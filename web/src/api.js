@@ -43,4 +43,6 @@ export const api = {
   adminFeedback: (token) => req('/admin/feedback', token),
   adminAnalyticsSummary: (token, days = 30) => req(`/admin/analytics/summary?days=${days}`, token),
   updateFeedback: (token, feedbackId, payload) => req(`/admin/feedback/${feedbackId}`, token, { method: 'PATCH', body: JSON.stringify(payload) }),
+  sourceCoverage: (token) => req('/admin/evidence/source-coverage', token),
+  needsCheck: (token) => req('/admin/evidence/needs-check', token),
 }

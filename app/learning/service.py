@@ -5,8 +5,12 @@ import io
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from sqlalchemy import func, select
+
+from app.db.models import ProductEvent, ReviewEvent, Topic
 
 from app.db.models import Flashcard
+from app.db.repositories import FlashcardRepo
 
 
 @dataclass
@@ -17,8 +21,18 @@ class QuizItem:
     explanation: str
 
 
+@dataclass
+class DailyLearningRoute:
+    mini_case: str
+    drug_risk: str
+    due_count: int
+    review_cards: list[str]
+    reflection_question: str
+    used_fallback: bool
+
+
 class LearningService:
-    CARD_SCHEMA_HINT = '{"cards":[{"front":"...","back":"...","difficulty":"easy|medium|hard","tags":["..."]}]}'
+    CARD_SCHEMA_HINT = '{"cards":[{"front":"...","back":"...","card_type":"fact|cloze|case_next_step|risk_check|owner_explain","difficulty":"easy|medium|hard","needs_manual_check":false,"tags":["..."]}]}'
     QUIZ_SCHEMA_HINT = '{"quiz":[{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"correct_answer":"A|B|C|D","explanation":"...","difficulty":"easy|medium|hard","tags":["..."]}]}'
 
     @staticmethod
@@ -45,6 +59,8 @@ class LearningService:
                 {
                     "front": front,
                     "back": back,
+                    "card_type": str(raw.get("card_type", "fact")),
+                    "needs_manual_check": bool(raw.get("needs_manual_check", False)),
                     "difficulty": raw.get("difficulty", "medium") if raw.get("difficulty") in {"easy", "medium", "hard"} else "medium",
                     "tags": sorted(set([*tags, *normalized_tags]))[:12],
                 }
@@ -74,7 +90,8 @@ class LearningService:
             f"Схема: {self.CARD_SCHEMA_HINT}. "
             f"Количество: {count}. "
             "front=короткий вопрос, back=точный ответ. Без дублей. "
-            "front 12-180 символов, back 16-400 символов, difficulty обязательный."
+            "front 12-180 символов, back 16-400 символов, difficulty обязательный. "
+            "Не создавать dosage cards с числовыми дозами без source/evidence; такие карточки помечать needs_manual_check: true."
             f"\nИсточник:\n{text[:4000]}"
         )
         raw = await llm_router.generate(db, user_id, prompt, purpose="summary")
@@ -92,7 +109,8 @@ class LearningService:
         prompt = (
             "Сгенерируй quiz в JSON без markdown. "
             f"Схема: {self.QUIZ_SCHEMA_HINT}. "
-            f"Количество: {count}. Без дублей вопросов."
+            f"Количество: {count}. Без дублей вопросов. "
+            "В explanation подробно объясни, почему правильный вариант верен и чем опасны distractors (неверные варианты)."
             f"\nИсточник:\n{text[:4000]}"
         )
         raw = await llm_router.generate(db, user_id, prompt, purpose="summary")
@@ -142,6 +160,91 @@ class LearningService:
             )
         return quiz
 
+    def build_daily_route(self, *, db, user_id, topic_id=None, now: datetime | None = None) -> DailyLearningRoute:
+        now = now or datetime.now(UTC)
+        due_cards = FlashcardRepo(db).list_due(user_id=user_id, topic_id=topic_id, now=now, limit=30)
+        all_cards = FlashcardRepo(db).by_user(user_id, limit=200)
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        reviewed_today = int(
+            db.execute(
+                select(func.count(ReviewEvent.id)).where(
+                    ReviewEvent.user_id == user_id,
+                    ReviewEvent.created_at >= start_of_day,
+                )
+            ).scalar_one()
+            or 0
+        )
+        cards_created_7d = int(
+            db.execute(
+                select(func.count(ProductEvent.id)).where(
+                    ProductEvent.user_id == user_id,
+                    ProductEvent.event_name == "cards_created",
+                    ProductEvent.created_at >= (now - timedelta(days=7)),
+                )
+            ).scalar_one()
+            or 0
+        )
+        topic_title = None
+        if topic_id is not None:
+            topic_row = db.execute(select(Topic.title).where(Topic.id == topic_id)).one_or_none()
+            topic_title = topic_row[0] if topic_row else None
+
+        used_fallback = not bool(due_cards or all_cards)
+        if used_fallback:
+            return DailyLearningRoute(
+                mini_case="Кошка, 3 года: рвота и диарея 24ч, аппетит снижен. Назови triage-красные флаги, 3 дифференциала и минимум диагностики.",
+                drug_risk="Препарат/риск: НПВС у кошек. Проверь вид, дегидратацию, почечные риски, сочетание со стероидами; при неполных данных — manual check.",
+                due_count=0,
+                review_cards=[
+                    "Triage: когда рвота/диарея требует срочной эскалации?",
+                    "Базовая диагностика: минимум при острой рвоте/диарее у собаки.",
+                    "НПВС у кошек: ключевые противопоказания и мониторинг.",
+                ],
+                reflection_question="Какое одно уточнение в приеме сегодня сильнее всего снизило бы риск клинической ошибки?",
+                used_fallback=True,
+            )
+
+        review_cards = [card.front for card in due_cards[:3]]
+        if len(review_cards) < 3:
+            seen = set(review_cards)
+            for card in all_cards:
+                if card.front in seen:
+                    continue
+                review_cards.append(card.front)
+                seen.add(card.front)
+                if len(review_cards) >= 3:
+                    break
+
+        seed_card = due_cards[0] if due_cards else all_cards[0]
+        scope = topic_title or "текущей теме"
+        mini_case = (
+            f"Мини-кейс ({scope}): {seed_card.front}. "
+            "Сформулируй 3 дифференциала и первый диагностический шаг."
+        )
+
+        full_text = " ".join([(seed_card.front or ""), (seed_card.back or "")]).lower()
+        if "нпвс" in full_text or "meloxic" in full_text or "мелокс" in full_text:
+            drug_risk = "Препарат/риск: НПВС. Проверь гидратацию, почечный статус, GI-риск, недавние стероиды и видовые ограничения."
+        else:
+            drug_risk = "Препарат/риск: антибиотики и нефротоксичность. Перед назначением проверь показания, почки, взаимодействия и план мониторинга."
+
+        if reviewed_today == 0:
+            reflection_question = "Что мешает закрыть первый цикл повторения сегодня, и какой самый маленький следующий шаг?"
+        elif cards_created_7d == 0:
+            reflection_question = "Какой пробел в теме стоит превратить в 1 новую карточку после сегодняшнего кейса?"
+        else:
+            reflection_question = "Какая типичная ошибка по этой теме у тебя еще возможна и как ты ее заранее поймаешь?"
+
+        return DailyLearningRoute(
+            mini_case=mini_case,
+            drug_risk=drug_risk,
+            due_count=len(due_cards),
+            review_cards=review_cards[:3],
+            reflection_question=reflection_question,
+            used_fallback=False,
+        )
+
     def apply_review(self, *, card: Flashcard, action: str, now: datetime | None = None) -> tuple[Flashcard, int]:
         now = now or datetime.now(UTC)
         ease = float(card.ease or 2.5)
@@ -162,6 +265,12 @@ class LearningService:
             ease = max(1.3, ease - 0.05) if action == "hard" else ease
             interval = max(1, interval // 2 if action in {"hard", "later"} else int(round(interval * 1.2)))
             reps += 1
+        
+        tags = list(card.tags or [])
+        if lapses >= 2 and "leech" not in tags:
+            tags.append("leech")
+            card.tags = tags
+
         card.ease = ease
         card.interval_days = interval
         card.reps = reps
