@@ -8,6 +8,13 @@ updates:
       time: "08:00"
     open-pull-requests-limit: 5
     labels: ["type:chore", "area:release", "ai:needs-context"]
+    groups:
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "npm"
     directory: "/web"
     schedule:
@@ -16,6 +23,13 @@ updates:
       time: "08:15"
     open-pull-requests-limit: 5
     labels: ["type:chore", "area:web", "ai:needs-context"]
+    groups:
+      web-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -24,3 +38,10 @@ updates:
       time: "08:30"
     open-pull-requests-limit: 5
     labels: ["type:chore", "area:release", "ai:needs-context"]
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
