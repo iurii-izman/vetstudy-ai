@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "prebuild": "node ./scripts/prebuild-cleanup.mjs",
+    "build": "vite build --emptyOutDir false",
     "preview": "vite preview",
     "test": "vitest run"
   },
