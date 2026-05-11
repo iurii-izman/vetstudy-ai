@@ -1,9 +1,9 @@
 """
-Virtual clinical cases for the /case training flow.
+Virtual clinical cases for the /case training and clinical reasoning flow.
 
 Design rules:
 - No proprietary content (no copied textbook text, no formulary tables).
-- All treatment references are educational-only and marked needs_manual_check.
+- Treatment doses must cite a source (SPC/formulary) or be marked needs_manual_check.
 - Rubric fields guide the LLM evaluation prompt, not hard-coded answers.
 """
 from __future__ import annotations
@@ -11,10 +11,9 @@ from __future__ import annotations
 import random
 from typing import Any
 
-# Educational disclaimer appended to every case description sent to the user.
+# Disclaimer appended to every case description sent to the user.
 CASE_EDUCATIONAL_DISCLAIMER = (
-    "\n\n⚠️ <i>Учебный кейс. Не является диагнозом или планом лечения реального животного. "
-    "Любые клинические решения для реального пациента требуют очной консультации ветеринара.</i>"
+    "\n\nℹ️ <i>AI может ошибаться — верифицируйте дозы и диагнозы по актуальным источникам.</i>"
 )
 
 # Each case dict has:

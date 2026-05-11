@@ -5,7 +5,7 @@ def test_dosage_requires_weight():
     gate = SafetyGate()
     result = gate.check("дай дозировку мелоксикама кошке")
     assert result.action == "ask_clarifying_questions"
-    assert result.allowed is False
+    assert result.allowed is True  # non-blocking: questions shown as soft hint
     assert any("масса" in q.lower() for q in (result.clarifying_questions or []))
 
 
@@ -21,8 +21,8 @@ def test_dosage_with_weight_allowed():
 def test_acceptance_paracetamol_cat_warning():
     gate = SafetyGate()
     result = gate.check("парацетамол кошке")
-    assert result.action == "ask_clarifying_questions"
-    assert result.allowed is False
+    assert result.action == "answer_with_warning"  # toxicology: non-blocking with warning
+    assert result.allowed is True
     assert "paracetamol_in_cats" in result.risk_tags
 
 
@@ -81,8 +81,8 @@ def test_intent_emergency_red_flag():
     gate = SafetyGate()
     result = gate.check("кошка не дышит, что делать срочно")
     assert result.intent == "emergency_or_red_flag"
-    assert result.action == "refuse_emergency_instruction_and_triage"
-    assert result.allowed is False
+    assert result.action == "answer_with_warning"  # non-blocking: full protocol given
+    assert result.allowed is True
 
 
 def test_nsaids_in_cats_risk_tag():
@@ -127,8 +127,8 @@ def test_dosage_reordered_skolko_dat_detected():
 def test_paracetamol_kot_detects_cat_warning():
     gate = SafetyGate()
     result = gate.check("Кот съел таблетку парацетамола")
-    assert result.action == "ask_clarifying_questions"
-    assert result.allowed is False
+    assert result.action == "answer_with_warning"  # toxicology: non-blocking, full protocol
+    assert result.allowed is True
     assert "paracetamol_in_cats" in result.risk_tags
 
 
@@ -136,8 +136,8 @@ def test_emergency_russian_seizure_phrase_escalates():
     gate = SafetyGate()
     result = gate.check("Кошка в судорогах 5 минут")
     assert result.intent == "emergency_or_red_flag"
-    assert result.action == "refuse_emergency_instruction_and_triage"
-    assert result.allowed is False
+    assert result.action == "answer_with_warning"  # non-blocking: full emergency protocol
+    assert result.allowed is True
 
 
 def test_dosage_russian_inflection_detected():
@@ -145,15 +145,15 @@ def test_dosage_russian_inflection_detected():
     result = gate.check("Дай дозу мелоксикама кошке")
     assert result.intent == "dosage_request"
     assert result.action == "ask_clarifying_questions"
-    assert result.allowed is False
+    assert result.allowed is True  # non-blocking
 
 
 def test_toxicology_chocolate_ingestion_detected():
     gate = SafetyGate()
     result = gate.check("Собака съела шоколад")
     assert result.intent == "toxicology"
-    assert result.action == "ask_clarifying_questions"
-    assert result.allowed is False
+    assert result.action == "answer_with_warning"  # non-blocking: full tox protocol
+    assert result.allowed is True
     assert "toxic_exposure_common" in result.risk_tags
 
 
@@ -169,7 +169,7 @@ def test_toxicology_permethrin_for_cat_detected():
     gate = SafetyGate()
     result = gate.check("Кошка слизала перметрин")
     assert result.intent == "toxicology"
-    assert result.action == "ask_clarifying_questions"
+    assert result.action == "answer_with_warning"  # non-blocking
 
 
 def test_interaction_phrase_without_plus_detected():
@@ -204,4 +204,4 @@ def test_disclaimers_present():
     gate = SafetyGate()
     result = gate.check("парацетамол кошке")
     assert result.disclaimers is not None
-    assert len(result.disclaimers) == 3
+    assert len(result.disclaimers) == 2  # reduced from 3: no more "учебная помощь" entry

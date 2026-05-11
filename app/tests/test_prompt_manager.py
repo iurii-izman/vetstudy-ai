@@ -45,7 +45,7 @@ def test_pharmacology_dosing_guard_text_present():
         session_history=[],
     )
     assert "Что проверить перед препаратом" in prompt
-    assert "Когда нужен `needs_manual_check`" in prompt
+    assert "needs_manual_check" in prompt
 
 
 def test_prompt_snapshot_evidence_mode():

@@ -353,6 +353,13 @@ def _quota_error_text() -> str:
     return "Лимит запросов или бюджета исчерпан. Попробуйте позже."
 
 
+def _safe_error_details(exc: Exception, **extra: object) -> dict:
+    details = {k: v for k, v in extra.items() if v is not None}
+    details["error_kind"] = exc.__class__.__name__
+    details["error_reason"] = str(exc)[:300]
+    return details
+
+
 def _user_profile(user) -> dict:
     settings = dict(user.settings or {})
     profile = dict(settings.get("profile") or {})
@@ -421,12 +428,11 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 properties={"topic_title": getattr(topic, "title", "unknown"), "mode": session.mode},
             )
             safety = safety_gate.check(text)
-            if not safety.allowed:
-                warn = safety.warning or "Недостаточно данных."
-                if safety.clarifying_questions:
-                    warn = f"{warn}\n\n" + "\n".join(f"- {q}" for q in safety.clarifying_questions)
-                await message.answer(warn)
-                return
+            # Non-blocking: show clarifying questions as a soft hint before the answer
+            if safety.clarifying_questions:
+                hint_lines = [safety.warning or "Уточняющие данные:"]
+                hint_lines += [f"- {q}" for q in safety.clarifying_questions]
+                await message.answer("\n".join(hint_lines))
             memory = MemoryService(MemoryRepo(db), topic_repo=TopicRepo(db), embedder=llm_router, chunk_repo=DocumentChunkRepo(db))
             search_results = await memory.search(db=db, user_id=user.id, query=text, current_topic_id=topic.id, top_k=5, cross_topic=True)
             memory_chunks = [
@@ -457,7 +463,8 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 evidence_preference=", ".join(preferred_sources) if preferred_sources else None,
                 safety_warning=safety.warning,
             )
-            prompt += "\n\nEVIDENCE_POLICY:\n- Используй только факты, подтверждённые блоком RETRIEVED_MEMORY.\n- Не делай уверенных утверждений, если в памяти нет подтверждения.\n- Для каждого клинического тезиса добавляй ссылку вида [doc/chunk]."
+            if effective_mode == "evidence":
+                prompt += "\n\nEVIDENCE_POLICY:\n- Используй только факты, подтверждённые блоком RETRIEVED_MEMORY.\n- Не делай уверенных утверждений, если в памяти нет подтверждения.\n- Для каждого клинического тезиса добавляй ссылку вида [doc/chunk]."
             answer = await llm_router.generate(db, user.id, prompt, purpose="answer")
             rendered_answer = answer
             evidence_payload = None
@@ -510,18 +517,18 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 user_id=user.id,
                 scope="telegram",
                 category="telegram_pipeline_db_error",
-                details={"topic_id": str(topic.id), "message_id": message.message_id},
+                details=_safe_error_details(exc, topic_id=str(topic.id), message_id=message.message_id),
             )
             logger.exception("db_error_in_pipeline", extra={"event": "telegram_pipeline_error", "error_category": "db_error"})
             await message.answer("Ошибка базы данных. Попробуйте чуть позже.")
             return
-        except RuntimeError:
+        except RuntimeError as exc:
             ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "provider"})
             ErrorEventRepo(db).add(
                 user_id=user.id,
                 scope="telegram",
                 category="telegram_pipeline_provider_error",
-                details={"topic_id": str(topic.id), "message_id": message.message_id},
+                details=_safe_error_details(exc, topic_id=str(topic.id), message_id=message.message_id),
             )
             logger.exception("provider_runtime_error", extra={"event": "telegram_pipeline_error", "error_category": "provider_error"})
             await message.answer(_provider_error_text())
@@ -534,7 +541,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 user_id=user.id,
                 scope="telegram",
                 category="telegram_pipeline_unexpected_error",
-                details={"topic_id": str(topic.id), "message_id": message.message_id, "error": str(exc)},
+                details=_safe_error_details(exc, topic_id=str(topic.id), message_id=message.message_id),
             )
             ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "unexpected"})
             logger.exception("pipeline_failed", extra={"event": "telegram_pipeline_error", "error_category": "telegram_error"})
@@ -1146,14 +1153,14 @@ async def cmd_today(message: Message):
         )
         lines = [
             "Маршрут на 15-30 минут:",
-            f"1) Мини-кейс: {route.mini_case}",
-            f"2) Препарат/риск: {route.drug_risk}",
-            f"3) Карточки к сроку: {route.due_count}",
-            "4) Повтори 3 карточки:",
+            f"1. Мини-кейс: {route.mini_case}",
+            f"2. Препарат/риск: {route.drug_risk}",
+            f"3. Карточки к сроку: {route.due_count}",
+            "4. Повтори 3 карточки:",
         ]
-        for idx, card_front in enumerate(route.review_cards[:3], start=1):
-            lines.append(f"   {idx}. {card_front}")
-        lines.append(f"5) Reflection: {route.reflection_question}")
+        for card_front in route.review_cards[:3]:
+            lines.append(f"- {card_front}")
+        lines.append(f"5. Reflection: {route.reflection_question}")
         await message.answer("\n".join(lines))
     finally:
         db.close()
@@ -1194,6 +1201,17 @@ def _set_user_case_id(user, case_id: str | None) -> None:
     else:
         settings["active_case_id"] = case_id
     user.settings = settings
+
+
+def _parse_case_answer_payload(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    parts = raw.split(maxsplit=1)
+    command_token = parts[0].lower()
+    if command_token.startswith("/case_answer"):
+        return parts[1].strip() if len(parts) > 1 else ""
+    return raw
 
 
 @router.message(Command("case"))
@@ -1260,8 +1278,7 @@ async def cmd_case_answer(message: Message):
             await message.answer("Активный кейс не найден. Выбери кейс через /case.")
             return
         # Get the student's answer from the message text (strip the command prefix)
-        raw = (message.text or "").strip()
-        student_answer = raw.removeprefix("/case_answer").strip()
+        student_answer = _parse_case_answer_payload(message.text or "")
         if not student_answer:
             await message.answer(
                 "Напиши свой анализ после команды, например:\n"
@@ -1325,23 +1342,20 @@ async def cmd_case_answer(message: Message):
             ]
         )
         await _send_ai_answer(message, answer, with_keyboard=False)
-        if message.answers:  # type: ignore[attr-defined]
-            pass
         try:
             await message.answer(
-                "⚠️ <i>Это учебная обратная связь, а не клиническое заключение. "
-                "Для реального животного — очная консультация ветеринара.</i>",
+                "ℹ️ <i>AI может ошибаться — верифицируйте дозы и диагнозы по актуальным источникам.</i>",
                 parse_mode=TELEGRAM_HTML_PARSE_MODE,
                 reply_markup=fb_keyboard,
             )
         except Exception:
             pass
-    except RuntimeError:
+    except RuntimeError as exc:
         ErrorEventRepo(db).add(
             user_id=user.id,
             scope="telegram",
             category="case_eval_provider_error",
-            details={"case_id": case_id},
+            details=_safe_error_details(exc, case_id=case_id),
         )
         await message.answer(_provider_error_text())
     except Exception as exc:
@@ -1352,7 +1366,7 @@ async def cmd_case_answer(message: Message):
                 user_id=user.id,
                 scope="telegram",
                 category="case_eval_unexpected_error",
-                details={"case_id": case_id, "error": str(exc)},
+                details=_safe_error_details(exc, case_id=case_id),
             )
             await message.answer("Временная ошибка. Попробуйте ещё раз.")
     finally:
@@ -1502,6 +1516,13 @@ async def on_ai_action(query: CallbackQuery):
             except Exception:
                 await query.message.answer(text, parse_mode=TELEGRAM_HTML_PARSE_MODE,
                                            reply_markup=_case_answer_keyboard(case["id"]))
+        return
+    if parsed.action == "case_submit":
+        if query.message:
+            await query.message.answer(
+                "Отправь анализ в формате:\n<code>/case_answer ваш разбор кейса</code>",
+                parse_mode=TELEGRAM_HTML_PARSE_MODE,
+            )
         return
     if parsed.action == "case_list":
         if query.message:

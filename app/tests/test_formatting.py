@@ -66,3 +66,14 @@ def test_format_ai_answer_keeps_evidence_citations_readable():
     assert "EMA Meloxicam Product Information [chunk-1]" in rendered
     assert "WSAVA Emergency Red Flags [mem-2]" in rendered
     assert "<code>needs_manual_check</code>" in rendered
+
+
+def test_format_ai_answer_avoids_duplicate_heading_or_bullet_emojis():
+    text = """⚠️ Красные флаги:
+- ⚠️ **Риск:** срочно в клинику
+🔍 Дифференциалы:
+- 🔍 **Дифференциалы:** гастрит, инородное тело
+"""
+    rendered = format_ai_answer_for_telegram(text)
+    assert "⚠️ ⚠️" not in rendered
+    assert "🔍 🔍" not in rendered

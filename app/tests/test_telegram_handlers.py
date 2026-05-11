@@ -72,7 +72,7 @@ def _patch_minimal_text_flow(monkeypatch, *, topic):
     )
     monkeypatch.setattr(handlers, "SubjectRepo", lambda db: SimpleNamespace(get_by_id=lambda *a, **k: None))
     monkeypatch.setattr(handlers.prompt_manager, "build", lambda **k: "prompt")
-    monkeypatch.setattr(handlers.safety_gate, "check", lambda text: SimpleNamespace(allowed=True, warning=None))
+    monkeypatch.setattr(handlers.safety_gate, "check", lambda text: SimpleNamespace(allowed=True, warning=None, clarifying_questions=None))
 
 
 async def _async_return(value):
@@ -299,6 +299,8 @@ async def test_today_command_builds_route_and_tracks_event(monkeypatch):
     text = message.answers[0]["text"]
     assert "Маршрут на 15-30 минут" in text
     assert "Карточки к сроку: 4" in text
+    assert "1. 1." not in text
+    assert "4. Повтори 3 карточки:\n- Q1" in text
     assert tracked and tracked[0]["event_name"] == "learning_route_opened"
 
 
@@ -399,7 +401,7 @@ async def test_voice_transcribes_and_answers(monkeypatch, tmp_path):
         lambda *a, **k: SimpleNamespace(search=lambda *x, **y: _async_return([]), ingest_assistant_answer=lambda *x, **y: _async_return(None)),
     )
     monkeypatch.setattr(handlers.prompt_manager, "build", lambda **k: "prompt")
-    monkeypatch.setattr(handlers.safety_gate, "check", lambda text: SimpleNamespace(allowed=True, warning=None))
+    monkeypatch.setattr(handlers.safety_gate, "check", lambda text: SimpleNamespace(allowed=True, warning=None, clarifying_questions=None))
     async def _generate(*args, **kwargs):
         return "answer"
     monkeypatch.setattr(handlers.llm_router, "generate", _generate)
@@ -466,6 +468,20 @@ async def test_callback_save_creates_note(monkeypatch):
     assert saved
     assert saved[0]["kind"] == "note"
     assert any("Сохранено" in item["text"] for item in query.message.answers)
+
+
+@pytest.mark.asyncio
+async def test_case_submit_callback_returns_instruction(monkeypatch):
+    monkeypatch.setattr(handlers, "get_settings", lambda: SimpleNamespace(allowed_user_ids={7}, allowed_usernames=set()))
+    query = SimpleNamespace(
+        data=handlers._callback_data("case_submit", "vomiting_dog"),
+        from_user=SimpleNamespace(id=7, full_name="U"),
+        answer=lambda *a, **k: _async_return(None),
+        message=FakeMessage(),
+    )
+    await handlers.on_ai_action(query)
+    assert query.message.answers
+    assert "/case_answer" in query.message.answers[0]["text"]
 
 @pytest.mark.asyncio
 async def test_review_shows_leech_hint(monkeypatch):

@@ -43,6 +43,24 @@ class FakeMessage:
         self.answers.append({"text": text, **kwargs})
 
 
+class FakeMessageNoAnswers:
+    def __init__(self, *, user_id=1, text="", username=None):
+        self.from_user = SimpleNamespace(id=user_id, full_name="Test User", username=username)
+        self.chat = SimpleNamespace(id=100)
+        self.message_thread_id = None
+        self.text = text
+        self.message_id = 42
+        self.bot = SimpleNamespace()
+        self.voice = None
+        self.audio = None
+        self.photo = []
+        self.document = None
+        self.replies: list[dict] = []
+
+    async def answer(self, text, **kwargs):
+        self.replies.append({"text": text, **kwargs})
+
+
 class FakeDB:
     def close(self): pass
     def commit(self): pass
@@ -123,9 +141,9 @@ def test_get_case_by_id_unknown():
 
 
 def test_educational_disclaimer_content():
-    # Disclaimer must contain both the educational marker and the real-animal warning
-    assert "Учебный кейс" in CASE_EDUCATIONAL_DISCLAIMER
-    assert "реального животного" in CASE_EDUCATIONAL_DISCLAIMER
+    # Disclaimer must contain the AI accuracy warning
+    assert "AI может ошибаться" in CASE_EDUCATIONAL_DISCLAIMER
+    assert "верифицируйте" in CASE_EDUCATIONAL_DISCLAIMER
 
 
 # ─────────────────────────── prompt safety ──────────────────────────────────
@@ -140,10 +158,10 @@ def test_build_case_eval_contains_safety_rules():
         rubric=case["rubric"],
         student_answer="Мой ответ: гастрит, дать противорвотное.",
     )
-    # Must include the safety rules (no invented doses, no confident treatment without data)
-    assert "needs_manual_check" in prompt.lower() or "Правила безопасности" in prompt
-    # Must NOT directly prescribe treatment to the student (the prompt instructs NOT to)
-    assert "НЕ давай" in prompt or "не давай" in prompt.lower()
+    # Must include accuracy rules (no invented doses, source required)
+    assert "needs_manual_check" in prompt.lower() or "Правила точности" in prompt
+    # Must instruct full clinical assessment: diagnosis and treatment plan
+    assert "диагноз" in prompt.lower() or "лечения" in prompt.lower()
 
 
 def test_build_case_eval_contains_rubric_items():
@@ -239,10 +257,10 @@ async def test_case_command_direct_id_sets_active_case_and_shows_disclaimer(monk
     # active_case_id must be set on this user's settings (user isolation)
     assert user.settings.get("active_case_id") == first_case["id"]
 
-    # Educational disclaimer must appear in the answer
+    # Disclaimer must appear in the answer
     assert message.answers
     combined = " ".join(a["text"] for a in message.answers)
-    assert "Учебный кейс" in combined or "реального животного" in combined
+    assert "AI может ошибаться" in combined or "верифицируйте" in combined
 
     # case_started event tracked
     assert any(e.get("event_name") == "case_started" for e in events)
@@ -379,7 +397,7 @@ async def test_case_answer_submits_and_tracks_event(monkeypatch):
 
     # Response must include educational disclaimer
     combined = " ".join(a["text"] for a in message.answers)
-    assert "учебная" in combined.lower() or "реального животного" in combined.lower() or "needs_manual_check" in combined.lower()
+    assert "AI может ошибаться" in combined or "верифицируйте" in combined or "needs_manual_check" in combined.lower()
 
 
 @pytest.mark.asyncio
@@ -416,7 +434,48 @@ async def test_case_answer_response_contains_safety_disclaimer(monkeypatch):
     combined = " ".join(a["text"] for a in message.answers)
     # The hardcoded disclaimer must always appear regardless of LLM output
     assert (
-        "учебная обратная связь" in combined.lower()
-        or "реального животного" in combined.lower()
-        or "очная консультация" in combined.lower()
-    ), f"Safety disclaimer missing from case_answer response: {combined[:300]}"
+        "AI может ошибаться" in combined
+        or "верифицируйте" in combined
+    ), f"AI accuracy disclaimer missing from case_answer response: {combined[:300]}"
+
+
+@pytest.mark.asyncio
+async def test_case_answer_no_runtime_dependency_on_message_answers(monkeypatch):
+    monkeypatch.setattr(handlers, "_check_allow", lambda msg: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    user = _make_user(case_id=CASES[0]["id"])
+    _patch_user_repo(monkeypatch, user)
+    _patch_topic_repo(monkeypatch)
+    _patch_analytics(monkeypatch, [])
+    monkeypatch.setattr(
+        handlers,
+        "QuotaGuard",
+        lambda s: SimpleNamespace(check_user_and_global=lambda db, u: SimpleNamespace(allowed=True, message=None)),
+    )
+    monkeypatch.setattr(handlers.llm_router, "generate", lambda *a, **k: _async_return("ok"))
+
+    message = FakeMessageNoAnswers(user_id=1, text="/case_answer анализ")
+    await handlers.cmd_case_answer(message)
+
+    assert message.replies
+
+
+@pytest.mark.asyncio
+async def test_case_answer_parses_command_with_mention(monkeypatch):
+    monkeypatch.setattr(handlers, "_check_allow", lambda msg: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    user = _make_user(case_id=CASES[0]["id"])
+    _patch_user_repo(monkeypatch, user)
+    _patch_topic_repo(monkeypatch)
+    _patch_analytics(monkeypatch, [])
+    monkeypatch.setattr(
+        handlers,
+        "QuotaGuard",
+        lambda s: SimpleNamespace(check_user_and_global=lambda db, u: SimpleNamespace(allowed=True, message=None)),
+    )
+    monkeypatch.setattr(handlers.llm_router, "generate", lambda *a, **k: _async_return("ok"))
+
+    message = FakeMessage(user_id=1, text="/case_answer@vetprofessor_bot Мой анализ")
+    await handlers.cmd_case_answer(message)
+
+    assert any("Напиши свой анализ" not in item["text"] for item in message.answers)

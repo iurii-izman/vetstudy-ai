@@ -43,6 +43,7 @@ SECTION_ICON_RULES: tuple[tuple[str, str], ...] = (
 SAFE_LINK_RE = re.compile(r"^(?:https?://|tg://)[^\s\"<>]+$", re.IGNORECASE)
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
 INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+LEADING_EMOJI_RE = re.compile(r"^(?:[\u2600-\u27BF\U0001F300-\U0001FAFF]\uFE0F?\s*)+")
 
 
 def format_ai_answer_for_telegram(text: str) -> str:
@@ -218,6 +219,8 @@ def _extract_heading(line: str) -> str:
 def _format_heading(text: str) -> str:
     clean = _strip_markdown(text).strip(":- ")
     icon = _icon_for(clean)
+    if _starts_with_emoji(clean):
+        return f"<b>{html.escape(clean)}</b>"
     return f"{icon} <b>{html.escape(clean)}</b>"
 
 
@@ -282,7 +285,13 @@ def _icon_for(text: str) -> str:
 
 
 def _leading_icon(text: str) -> str:
+    if _starts_with_emoji(text):
+        return ""
     label_match = re.match(r"^\*\*(.{2,64}?):\*\*", text)
     if label_match:
         return f"{_icon_for(label_match.group(1))} "
     return ""
+
+
+def _starts_with_emoji(text: str) -> bool:
+    return bool(LEADING_EMOJI_RE.match(text.strip()))

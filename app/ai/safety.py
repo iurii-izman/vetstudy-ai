@@ -33,7 +33,7 @@ class SafetyGate:
         re.IGNORECASE,
     )
     CLINICAL_CASE_PATTERN = re.compile(
-        r"\b(симптом\w*|анамнез\w*|кейс\w*|случа\w*|диагноз\w*|лечени\w*|рвот\w*|вялост\w*|болезнен\w*|одышк\w*|диаре\w*|желтуш\w*)\b",
+        r"\b(симптом\w*|анамнез\w*|кейс\w*|случа\w*|диагноз\w*|лечени\w*|рвот\w*|вялост\w*|болезнен\w*|одышк\w*|диаре\w*|желтуш\w*|протокол\w*|пиометр\w*|гнойн\w*\s+ран\w*)\b",
         re.IGNORECASE,
     )
     EMERGENCY_PATTERN = re.compile(
@@ -76,31 +76,34 @@ class SafetyGate:
 
     DISCLAIMERS = [
         "Проверьте по актуальной инструкции/формуляру.",
-        "Это учебная помощь, не замена очному решению врача.",
-        "При красных флагах нужна срочная очная помощь.",
+        "AI может ошибаться — верифицируйте клинические решения.",
     ]
 
     def check(self, text: str) -> SafetyResult:
         normalized = self._normalize_text(text)
         intent = self._classify_intent(normalized)
         risk_tags = self._detect_risk_tags(normalized)
+        if intent == "clinical_case" and "clinical_case" not in risk_tags:
+            risk_tags.append("clinical_case")
+        if intent == "drug_interaction" and "drug_interaction" not in risk_tags:
+            risk_tags.append("drug_interaction")
 
         if intent == "emergency_or_red_flag":
             return SafetyResult(
-                action="refuse_emergency_instruction_and_triage",
+                action="answer_with_warning",
                 intent=intent,
                 risk_tags=risk_tags,
-                allowed=False,
-                warning="Красные флаги: срочно в клинику, нужна срочная очная/неотложная помощь. Удаленно нельзя давать пошаговые экстренные инструкции.",
+                allowed=True,
+                warning="⚠️ Красные флаги — экстренная ситуация. Дай полный алгоритм неотложных действий.",
                 disclaimers=self.DISCLAIMERS,
             )
         if intent == "toxicology":
             return SafetyResult(
-                action="ask_clarifying_questions",
+                action="answer_with_warning",
                 intent=intent,
                 risk_tags=risk_tags,
-                allowed=False,
-                warning="Подозрение на токсикологию: это опасно, есть токсикологический риск, требует проверки. Нужна срочная очная помощь и срочность оценки в клинике/с ветеринаром.",
+                allowed=True,
+                warning="⚠️ Токсикологический случай. Дай полный протокол: оценка дозы токсина, симптомы, антидот/деконтаминация, мониторинг.",
                 clarifying_questions=self._build_toxicology_clarifying_questions(normalized),
                 disclaimers=self.DISCLAIMERS,
             )
@@ -112,8 +115,8 @@ class SafetyGate:
                     action="ask_clarifying_questions",
                     intent=intent,
                     risk_tags=risk_tags,
-                    allowed=False,
-                    warning="Недостаточно данных для безопасного расчета дозы.",
+                    allowed=True,
+                    warning="Уточняющие данные для точного расчёта дозы (ответ будет дан на основе имеющегося):",
                     clarifying_questions=questions,
                     disclaimers=self.DISCLAIMERS,
                 )
@@ -123,7 +126,7 @@ class SafetyGate:
                 intent=intent,
                 risk_tags=risk_tags,
                 allowed=True,
-                warning="Для учебного клинического случая дайте дифференциалы и план диагностики; не ставьте финальный диагноз удаленно.",
+                warning="Клинический случай. Дай наиболее вероятный диагноз, дифференциалы и конкретный план лечения.",
                 disclaimers=self.DISCLAIMERS,
             )
 
