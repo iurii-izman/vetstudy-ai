@@ -4,7 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     env_file:
-      - .env
+      - path: .env
+        format: raw
     depends_on:
       db:
         condition: service_healthy
@@ -27,7 +28,8 @@ services:
       context: .
       dockerfile: Dockerfile
     env_file:
-      - .env
+      - path: .env
+        format: raw
     depends_on:
       backend:
         condition: service_healthy
@@ -51,7 +53,8 @@ services:
       context: .
       dockerfile: Dockerfile
     env_file:
-      - .env
+      - path: .env
+        format: raw
     depends_on:
       db:
         condition: service_healthy

@@ -23,6 +23,10 @@ HIGH_RISK_MARKERS = (
 
 AUTHORITATIVE_DOSING_CATEGORIES = {"product_label_or_spc", "licensed_formulary"}
 DOSAGE_QUERY_PATTERN = re.compile(r"\b(доз|mg/kg|мг/кг|мг|mg|мл|ml|сколько\s+дать|рассчит)\b", re.IGNORECASE)
+SHORT_ANSWER_HEADER_PATTERN = re.compile(r"^\**\s*(короткий\s+ответ|short\s+answer)\s*\**\s*:?\s*$", re.IGNORECASE)
+SECTION_HEADER_PATTERN = re.compile(r"^\**\s*(evidence|citations|статус|manual\s*check)\s*\**\s*:?\s*$", re.IGNORECASE)
+IRRELEVANT_CITATION_TITLE = {"", "-", "n/a", "none", "unknown", "untitled source"}
+IRRELEVANT_CITATION_REF = {"", "-", "n/a", "none", "unknown"}
 
 
 @dataclass
@@ -75,17 +79,23 @@ class EvidenceService:
         trust_levels: list[int] = []
         source_categories: list[str] = []
         for item in retrieved[:4]:
-            ref = item.chunk_id or item.memory_id or "-"
-            title = item.source_title or "Untitled source"
+            ref = str(item.chunk_id or item.memory_id or "").strip()
+            title = str(item.source_title or "").strip() or "Untitled source"
             source = self._source_for_title(sources, title)
             trust = int(source.get("trust_level", 2)) if source else 2
             category = str(source.get("category", "")) if source else ""
-            trust_levels.append(trust)
-            source_categories.append(category)
-            evidence_bullets.append(f"{item.snippet}")
-            citations.append(f"{title} [{ref}]")
+            snippet = self._normalize_line(str(item.snippet or ""))
+            citation = self._format_citation(title=title, ref=ref)
+            if snippet:
+                evidence_bullets.append(snippet)
+            if citation:
+                citations.append(citation)
+                trust_levels.append(trust)
+                source_categories.append(category)
 
-        normalized = re.sub(r"\s+", " ", (llm_answer or "")).strip() or "не подтверждено источником"
+        evidence_bullets = self._dedupe_lines(evidence_bullets)
+        citations = self._dedupe_lines(citations)
+        normalized = self._sanitize_short_answer(llm_answer)
         has_authoritative_dosing_source = any(
             category in AUTHORITATIVE_DOSING_CATEGORIES and trust >= 5
             for category, trust in zip(source_categories, trust_levels, strict=False)
@@ -160,3 +170,54 @@ class EvidenceService:
             if (item.get("title") or "").strip().lower() == title_norm:
                 return item
         return None
+
+    @staticmethod
+    def _normalize_line(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").strip())
+
+    def _sanitize_short_answer(self, raw_answer: str) -> str:
+        lines = (raw_answer or "").splitlines()
+        chunks: list[str] = []
+        for raw_line in lines:
+            line = self._normalize_line(raw_line)
+            if not line:
+                continue
+            if SHORT_ANSWER_HEADER_PATTERN.match(line):
+                continue
+            if SECTION_HEADER_PATTERN.match(line):
+                break
+            chunks.append(line)
+        if not chunks:
+            return "не подтверждено источником"
+        return " ".join(self._dedupe_lines(chunks)) or "не подтверждено источником"
+
+    @classmethod
+    def _format_citation(cls, *, title: str, ref: str) -> str | None:
+        title_norm = cls._normalize_line(title).lower()
+        ref_norm = cls._normalize_line(ref).lower()
+        if title_norm in IRRELEVANT_CITATION_TITLE and ref_norm in IRRELEVANT_CITATION_REF:
+            return None
+        if title_norm in IRRELEVANT_CITATION_TITLE and ref_norm in {"", "-"}:
+            return None
+        if not title_norm and not ref_norm:
+            return None
+        formatted_title = cls._normalize_line(title) or "Untitled source"
+        formatted_ref = cls._normalize_line(ref) or "-"
+        if formatted_title.lower() == "untitled source" and formatted_ref == "-":
+            return None
+        return f"{formatted_title} [{formatted_ref}]"
+
+    @classmethod
+    def _dedupe_lines(cls, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for item in values:
+            normalized = cls._normalize_line(item)
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(normalized)
+        return out

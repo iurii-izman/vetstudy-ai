@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import time
 from datetime import UTC, datetime
@@ -66,6 +67,12 @@ class LLMRouter:
         "uncertain_source",
     }
 
+    @dataclass
+    class _BreakerState:
+        state: str = "closed"
+        failures: int = 0
+        open_until_monotonic: float = 0.0
+
     def __init__(
         self,
         *,
@@ -85,6 +92,7 @@ class LLMRouter:
         self.cost_guard = CostGuard(settings)
         self.validator = PostGenerationValidator()
         self._provider_locks: dict[str, asyncio.Semaphore] = {}
+        self._breaker_by_provider: dict[tuple[str, str], LLMRouter._BreakerState] = {}
 
     async def generate(
         self,
@@ -109,6 +117,8 @@ class LLMRouter:
                 continue
             t0 = time.perf_counter()
             model = self._provider_model(provider)
+            if not self._breaker_can_attempt(provider=provider, model=model, purpose=purpose, user_id=user_id):
+                continue
             fallback_used = idx > 0
             self._log_route_decision(
                 route_decision=route_decision,
@@ -135,6 +145,7 @@ class LLMRouter:
                 response.text = validated.rewritten_answer
                 self._log_call(db, user_id, response, purpose, latency_ms, "ok")
                 self._log_structured("ok", provider.name, model, purpose, latency_ms, None, user_id, self.settings.user_id_hash_salt)
+                self._breaker_on_success(provider=provider, model=model, purpose=purpose, user_id=user_id)
                 return response.text
             except Exception as exc:
                 last_error = exc
@@ -154,6 +165,7 @@ class LLMRouter:
                     category="provider_call_failed",
                     details={"provider": provider.name, "model": model, "purpose": purpose, "error": str(exc)},
                 )
+                self._breaker_on_failure(provider=provider, model=model, purpose=purpose, user_id=user_id, error=exc)
                 continue
         if isinstance(last_error, LLMAuthError):
             return f"Ошибка AI-конфигурации: {last_error}"
@@ -382,3 +394,118 @@ class LLMRouter:
                 "telegram_user_id": safe_user_id(user_id, self.settings.user_id_hash_salt),
             },
         )
+
+    def _breaker_can_attempt(self, *, provider: Any, model: str, purpose: str, user_id) -> bool:
+        key = (str(getattr(provider, "name", "")), model)
+        breaker = self._breaker_by_provider.setdefault(key, self._BreakerState())
+        if breaker.state != "open":
+            return True
+        now = time.monotonic()
+        if now >= breaker.open_until_monotonic:
+            breaker.state = "half_open"
+            self._log_breaker_state(
+                provider=key[0],
+                model=model,
+                purpose=purpose,
+                user_id=user_id,
+                state="half_open",
+                reason="open_window_elapsed",
+                failures=breaker.failures,
+            )
+            return True
+        remaining_ms = int(max(0.0, breaker.open_until_monotonic - now) * 1000)
+        self._log_breaker_state(
+            provider=key[0],
+            model=model,
+            purpose=purpose,
+            user_id=user_id,
+            state="open",
+            reason="skipped_due_to_open_breaker",
+            failures=breaker.failures,
+            open_remaining_ms=remaining_ms,
+        )
+        return False
+
+    def _breaker_on_success(self, *, provider: Any, model: str, purpose: str, user_id) -> None:
+        key = (str(getattr(provider, "name", "")), model)
+        breaker = self._breaker_by_provider.setdefault(key, self._BreakerState())
+        should_log = breaker.state in {"open", "half_open"} or breaker.failures > 0
+        breaker.state = "closed"
+        breaker.failures = 0
+        breaker.open_until_monotonic = 0.0
+        if should_log:
+            self._log_breaker_state(
+                provider=key[0],
+                model=model,
+                purpose=purpose,
+                user_id=user_id,
+                state="closed",
+                reason="provider_call_succeeded",
+                failures=0,
+            )
+
+    def _breaker_on_failure(self, *, provider: Any, model: str, purpose: str, user_id, error: Exception) -> None:
+        if not isinstance(error, (LLMRateLimitError, LLMTransientError, asyncio.TimeoutError)):
+            return
+        key = (str(getattr(provider, "name", "")), model)
+        breaker = self._breaker_by_provider.setdefault(key, self._BreakerState())
+        threshold = max(1, int(self.settings.llm_circuit_breaker_failures))
+        open_seconds = max(1.0, float(self.settings.llm_circuit_breaker_open_seconds))
+
+        if breaker.state == "half_open":
+            breaker.state = "open"
+            breaker.failures = threshold
+            breaker.open_until_monotonic = time.monotonic() + open_seconds
+            self._log_breaker_state(
+                provider=key[0],
+                model=model,
+                purpose=purpose,
+                user_id=user_id,
+                state="open",
+                reason=f"half_open_failed:{error.__class__.__name__}",
+                failures=breaker.failures,
+                open_remaining_ms=int(open_seconds * 1000),
+            )
+            return
+
+        breaker.failures += 1
+        if breaker.failures < threshold:
+            return
+        breaker.state = "open"
+        breaker.open_until_monotonic = time.monotonic() + open_seconds
+        self._log_breaker_state(
+            provider=key[0],
+            model=model,
+            purpose=purpose,
+            user_id=user_id,
+            state="open",
+            reason=f"failure_threshold_reached:{error.__class__.__name__}",
+            failures=breaker.failures,
+            open_remaining_ms=int(open_seconds * 1000),
+        )
+
+    def _log_breaker_state(
+        self,
+        *,
+        provider: str,
+        model: str,
+        purpose: str,
+        user_id,
+        state: str,
+        reason: str,
+        failures: int,
+        open_remaining_ms: int | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "event": "breaker_state",
+            "breaker_state": state,
+            "reason": reason,
+            "provider": provider,
+            "model": model,
+            "purpose": purpose,
+            "failures": failures,
+            "telegram_user_id": safe_user_id(user_id, self.settings.user_id_hash_salt),
+        }
+        if open_remaining_ms is not None:
+            payload["open_remaining_ms"] = open_remaining_ms
+        logger.info("breaker_state", extra=payload)

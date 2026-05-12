@@ -25,7 +25,7 @@ TELEGRAM_BOT_TOKEN=
 ALLOWED_TELEGRAM_USER_IDS=<ВАШ_TELEGRAM_USER_ID>
 USER_ID_HASH_SALT=<ЛЮБАЯ_ДЛИННАЯ_СТРОКА>
 WEB_OWNER_TELEGRAM_ID=<ВАШ_TELEGRAM_USER_ID>
-WEB_OWNER_PASSWORD_HASH=<PBKDF2_HASH_ИЛИ_ОСТАВЬТЕ_ПУСТЫМ>
+WEB_OWNER_PASSWORD_HASH='<PBKDF2_HASH_ИЛИ_ОСТАВЬТЕ_ПУСТЫМ>'
 WEB_OWNER_PASSWORD=<ДЛИННЫЙ_ПАРОЛЬ_ДЛЯ_WEB_ЕСЛИ_HASH_НЕ_ИСПОЛЬЗУЕТСЯ>
 WEB_OWNER_TOKEN=<ДЛИННЫЙ_RANDOM_TOKEN_ДЛЯ_WEB>
 WEB_SESSION_SECRET=<ДЛИННЫЙ_RANDOM_SECRET_ДЛЯ_SESSION>
@@ -39,6 +39,8 @@ LLM_HIGH_RISK_PROVIDER=openai
 LLM_HIGH_RISK_MODEL=gpt-5.4
 LLM_LOW_RISK_PROVIDER=gemini
 LLM_LOW_RISK_MODEL=gemini-2.5-flash-lite
+LLM_EMBEDDINGS_PROVIDER=openai
+LLM_EMBEDDINGS_MODEL=text-embedding-3-small
 ```
 
 Остальное уже преднастроено в `.env.example` под бесплатный beta-режим:

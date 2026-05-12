@@ -62,7 +62,8 @@ def make_client():
     feedback = FeedbackEvent(user_id=user1.id, topic_id=topic1.id, message_id=msg1.id, source_message_id=msg1.id, feedback_type="down", status="new", metadata_={})
     ev1 = ProductEvent(user_id=user1.id, topic_id=topic1.id, session_id=sess1.id, event_name="activation_start", properties={})
     ev2 = ProductEvent(user_id=user1.id, topic_id=topic1.id, session_id=sess1.id, event_name="high_risk_query", properties={})
-    db.add_all([note1, note2, card1, card2, call1, err1, feedback, ev1, ev2])
+    ev3 = ProductEvent(user_id=user1.id, topic_id=topic1.id, session_id=sess1.id, event_name="retrieval_context_built", properties={"results": 2, "memory_hits": 1, "document_hits": 1})
+    db.add_all([note1, note2, card1, card2, call1, err1, feedback, ev1, ev2, ev3])
     db.flush()
     doc = Document(user_id=user1.id, topic_id=topic1.id, filename="u1.pdf", size_bytes=100, status="indexed", job_id="job-u1", metadata_={})
     db.add(doc)
@@ -313,3 +314,7 @@ def test_profile_endpoints_and_admin_analytics_summary():
     assert summary.status_code == 200
     assert "activation_funnel" in summary.json()
     assert "content_gap_report" in summary.json()
+    assert "retrieval_quality" in summary.json()
+    retrieval = client.get("/api/web/admin/analytics/retrieval-quality", headers=_owner_headers())
+    assert retrieval.status_code == 200
+    assert "retrieval_hit_rate" in retrieval.json()

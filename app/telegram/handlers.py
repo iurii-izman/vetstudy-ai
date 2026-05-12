@@ -436,6 +436,18 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             subject = SubjectRepo(db).get_by_id(topic.subject_id)
             history_rows = MessageRepo(db).recent_for_session(session.id, limit=6)
             high_risk = evidence.is_high_risk(text, getattr(safety, "risk_tags", []))
+            analytics.track(
+                user_id=user.id,
+                topic_id=topic.id,
+                session_id=session.id,
+                event_name="retrieval_context_built",
+                properties={
+                    "results": len(search_results),
+                    "memory_hits": sum(1 for item in search_results if item.memory_id),
+                    "document_hits": sum(1 for item in search_results if item.chunk_id),
+                    "high_risk": high_risk,
+                },
+            )
             if high_risk:
                 analytics.track(
                     user_id=user.id,

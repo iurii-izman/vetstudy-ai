@@ -22,12 +22,18 @@ def test_product_analytics_summary_methods():
         service.track(user_id=user.id, event_name="activation_start")
         service.track(user_id=user.id, event_name="activation_first_question")
         db.add(ProductEvent(user_id=user.id, event_name="search_performed", properties={"results": 0, "topic_title": "T"}, created_at=datetime.now(UTC) - timedelta(days=1)))
+        db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 0, "memory_hits": 0, "document_hits": 0}))
+        db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 3, "memory_hits": 2, "document_hits": 1}))
         db.commit()
 
         funnel = service.activation_funnel(days=30)
         assert any(step["step"] == "activation_start" and step["users"] == 1 for step in funnel)
         gaps = service.content_gap_report(days=30)
         assert gaps["zero_results_total"] >= 1
+        retrieval = service.retrieval_quality(days=30)
+        assert retrieval["retrieval_total"] == 2
+        assert retrieval["retrieval_hit_rate"] == 0.5
+        assert retrieval["avg_retrieved_chunks"] == 1.5
         summary = service.behavior_summary(days=30)
         assert "events" in summary
     finally:

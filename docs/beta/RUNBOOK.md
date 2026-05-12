@@ -6,6 +6,7 @@
 - `python scripts/preflight_check.py --db --schema --provider`
 - `alembic upgrade head` on target DB clone.
 - For web changes: `cd web && npm test && npm run build && npm audit --omit=dev`.
+- For `APP_ENV=prod`, verify `LLM_EMBEDDINGS_PROVIDER` is not `mock` (preflight now fails otherwise).
 
 ## 2. Deploy and verification
 - Apply migrations first, then deploy app and worker.
@@ -13,6 +14,9 @@
 - Verify `GET /health` and `GET /ready`.
 - Verify `/api/web/auth/session` login and `/api/web/auth/refresh` rotation.
 - Verify `/api/web/admin/metrics/providers` and `/api/web/admin/alerts/unanswered`.
+- Verify `/api/web/admin/analytics/retrieval-quality` for retrieval hit/empty rates.
+- Verify router logs include `route_decision` and `reason` fields (JSON logs, `docker compose logs bot`).
+- Verify breaker transitions in logs (`event=breaker_state`, states `open|half_open|closed`) during provider instability.
 
 ## 3. Backup/restore drill
 - Backup: `./scripts/backup_pg.sh`.
@@ -23,6 +27,7 @@
 ## 4. Secret rotation
 - Rotate: `WEB_OWNER_TOKEN`, `WEB_SESSION_SECRET`, provider keys, `USER_ID_HASH_SALT`.
 - Prefer `WEB_OWNER_PASSWORD_HASH` over plain `WEB_OWNER_PASSWORD`.
+- If `WEB_OWNER_PASSWORD_HASH` has `$`, keep it single-quoted in `.env` to avoid Compose interpolation warnings.
 - After rotation run one login smoke and one Telegram request smoke.
 
 ## 5. Localhost / 127.0.0.1 caveat (Windows/WSL/Docker)

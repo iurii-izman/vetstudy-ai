@@ -674,8 +674,20 @@ def admin_analytics_summary(
         "retention_lite": service.retention_lite(days=days),
         "dau_like": service.dau_like(days=min(max(days, 1), 60)),
         "content_gap_report": service.content_gap_report(days=days),
+        "retrieval_quality": service.retrieval_quality(days=days),
         "behavior": service.behavior_summary(days=days),
     }
+
+
+@router.get("/admin/analytics/retrieval-quality")
+def admin_retrieval_quality(
+    days: int = 30,
+    _: str = Depends(_check_token),
+    user: User = Depends(_get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(user)
+    return ProductAnalyticsService(db).retrieval_quality(days=days)
 
 
 @router.patch("/admin/feedback/{feedback_id}")

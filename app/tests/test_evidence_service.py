@@ -87,3 +87,65 @@ def test_preferred_sources_by_region_and_species(tmp_path):
     service.settings.evidence_sources_path = str(path)
     picked = service.preferred_sources(region="us", species_focus="dog")
     assert "US dog source" in picked
+
+
+def test_evidence_postprocess_dedupes_answer_and_filters_citations(tmp_path):
+    path = tmp_path / "sources.json"
+    path.write_text(
+        """
+        {
+          "sources": [
+            {
+              "source_id": "label",
+              "title": "Exact Product SPC",
+              "category": "product_label_or_spc",
+              "trust_level": 5,
+              "region": "Moldova/Transnistria",
+              "species": "dog"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    service = EvidenceService()
+    service.settings.evidence_sources_path = str(path)
+
+    resp = service.build_response(
+        query="Что делать?",
+        llm_answer=(
+            "**Короткий ответ**\n"
+            "Учебный пример, сначала стабилизация.\n"
+            "Учебный пример, сначала стабилизация.\n\n"
+            "**Evidence**\n"
+            "- лишний блок\n"
+        ),
+        retrieved=[
+            SimpleNamespace(chunk_id="c1", memory_id=None, source_title="Exact Product SPC", snippet="SPC stabilization step."),
+            SimpleNamespace(chunk_id="c1", memory_id=None, source_title="Exact Product SPC", snippet="SPC stabilization step."),
+            SimpleNamespace(chunk_id="-", memory_id=None, source_title="Untitled source", snippet=""),
+        ],
+        high_risk=False,
+    )
+
+    assert resp.short_answer == "Учебный пример, сначала стабилизация."
+    assert resp.evidence_bullets == ["SPC stabilization step."]
+    assert resp.citations == ["Exact Product SPC [c1]"]
+
+
+def test_evidence_postprocess_keeps_manual_check_when_citations_filtered(tmp_path):
+    path = tmp_path / "sources.json"
+    path.write_text('{"sources":[]}', encoding="utf-8")
+    service = EvidenceService()
+    service.settings.evidence_sources_path = str(path)
+
+    resp = service.build_response(
+        query="Рассчитай дозу для кошки",
+        llm_answer="**Короткий ответ**\nУчебный расчет.",
+        retrieved=[SimpleNamespace(chunk_id="-", memory_id=None, source_title="Untitled source", snippet="")],
+        high_risk=True,
+    )
+
+    assert resp.citations == []
+    assert resp.status == "needs_manual_check"
+    assert resp.needs_manual_check is True

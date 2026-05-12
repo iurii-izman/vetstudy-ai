@@ -106,6 +106,47 @@ class ProductAnalyticsService:
             "zero_results_by_topic": dict(by_topic),
         }
 
+    def retrieval_quality(self, *, days: int = 30) -> dict[str, Any]:
+        since = datetime.now(UTC) - timedelta(days=days)
+        search_rows = self.db.execute(
+            select(ProductEvent.properties)
+            .where(
+                ProductEvent.event_name == "search_performed",
+                ProductEvent.created_at >= since,
+            )
+        ).all()
+        search_counts = [int((row[0] or {}).get("results", 0) or 0) for row in search_rows]
+        search_total = len(search_counts)
+        search_hits = sum(1 for count in search_counts if count > 0)
+        search_zero = search_total - search_hits
+
+        retrieval_rows = self.db.execute(
+            select(ProductEvent.properties)
+            .where(
+                ProductEvent.event_name == "retrieval_context_built",
+                ProductEvent.created_at >= since,
+            )
+        ).all()
+        retrieval_props = [row[0] or {} for row in retrieval_rows]
+        retrieved_counts = [int(item.get("results", 0) or 0) for item in retrieval_props]
+        memory_hits = [int(item.get("memory_hits", 0) or 0) for item in retrieval_props]
+        document_hits = [int(item.get("document_hits", 0) or 0) for item in retrieval_props]
+        retrieval_total = len(retrieved_counts)
+        retrieval_hits = sum(1 for count in retrieved_counts if count > 0)
+        retrieval_zero = retrieval_total - retrieval_hits
+
+        return {
+            "search_total": search_total,
+            "search_hit_rate": (search_hits / search_total) if search_total else 0.0,
+            "search_empty_rate": (search_zero / search_total) if search_total else 0.0,
+            "retrieval_total": retrieval_total,
+            "retrieval_hit_rate": (retrieval_hits / retrieval_total) if retrieval_total else 0.0,
+            "retrieval_empty_rate": (retrieval_zero / retrieval_total) if retrieval_total else 0.0,
+            "avg_retrieved_chunks": (sum(retrieved_counts) / retrieval_total) if retrieval_total else 0.0,
+            "avg_memory_hits": (sum(memory_hits) / retrieval_total) if retrieval_total else 0.0,
+            "avg_document_hits": (sum(document_hits) / retrieval_total) if retrieval_total else 0.0,
+        }
+
     def behavior_summary(self, *, days: int = 30) -> dict[str, Any]:
         since = datetime.now(UTC) - timedelta(days=days)
         by_event_rows = self.db.execute(

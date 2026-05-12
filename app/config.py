@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     llm_request_timeout_s: float = 30.0
     llm_retry_attempts: int = 2
     llm_retry_backoff_s: float = 0.5
+    llm_circuit_breaker_failures: int = 2
+    llm_circuit_breaker_open_seconds: float = 20.0
     llm_max_request_tokens: int = 4096
     llm_low_risk_provider: str = "gemini"
     llm_low_risk_model: str = "gemini-2.5-flash-lite"

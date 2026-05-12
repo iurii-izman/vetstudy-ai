@@ -18,7 +18,7 @@ VetStudy AI is a Telegram-first educational assistant for veterinary study, virt
 - Learning memory: user-scoped notes, summaries, saved answers, search, Anki/Markdown exports
 - Flashcards: generation, spaced-review actions, review event tracking
 - Documents: TXT/MD/PDF/DOCX extraction and Redis-backed indexing jobs
-- AI safety: allowlist, quota guard, high-risk detection, prompt policy, post-generation validators, model fallback
+- AI safety: allowlist, quota guard, high-risk detection, prompt policy, post-generation validators, model fallback, short-lived provider circuit breaker
 - Admin: provider costs, feedback, errors, topic graph, product analytics, evidence source coverage
 
 ## Stack
@@ -40,6 +40,12 @@ Fill required secrets in `.env`, then run:
 
 ```bash
 docker compose up --build
+```
+
+If `WEB_OWNER_PASSWORD_HASH` contains `$` symbols (PBKDF2 format), wrap it in single quotes in `.env`:
+
+```env
+WEB_OWNER_PASSWORD_HASH='$pbkdf2-sha256$...'
 ```
 
 Verify:
@@ -155,6 +161,7 @@ Required for beta:
 - `WEB_SESSION_SECRET`
 - dual-risk routing variables: `LLM_LOW_RISK_PROVIDER`, `LLM_LOW_RISK_MODEL`, `LLM_HIGH_RISK_PROVIDER`, `LLM_HIGH_RISK_MODEL`
 - at least one provider key: `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, or `GEMINI_API_KEY`
+- for `APP_ENV=prod`, set a real embeddings provider/model (`LLM_EMBEDDINGS_PROVIDER != mock`)
 
 Recommended:
 

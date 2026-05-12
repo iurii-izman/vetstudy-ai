@@ -1,9 +1,13 @@
+import logging
+
 from app.ai.prompts import PromptManager
 from app.ai.providers.http_provider import DisabledProvider, GeminiProvider, OpenAICompatProvider
 from app.ai.providers.mock import MockProvider
 from app.ai.router import LLMRouter
 from app.ai.safety import SafetyGate
 from app.config import get_settings
+
+logger = logging.getLogger("app.services")
 
 
 def _build_provider(name: str, model: str, settings):
@@ -53,13 +57,28 @@ def _build_provider(name: str, model: str, settings):
 
 def build_llm_router() -> LLMRouter:
     settings = get_settings()
+    embeddings = _build_provider(settings.llm_embeddings_provider, settings.llm_embeddings_model, settings)
+    if settings.app_env == "prod" and settings.llm_embeddings_provider.lower() == "mock":
+        logger.warning(
+            "prod_mock_embeddings_disabled",
+            extra={
+                "event": "prod_mock_embeddings_disabled",
+                "provider": settings.llm_embeddings_provider,
+                "model": settings.llm_embeddings_model,
+                "reason": "mock_embeddings_forbidden_in_prod",
+            },
+        )
+        embeddings = DisabledProvider(
+            "mock",
+            "mock embeddings disabled in APP_ENV=prod; configure LLM_EMBEDDINGS_PROVIDER with a real provider",
+        )
     return LLMRouter(
         settings=settings,
         primary=_build_provider(settings.llm_primary_provider, settings.llm_primary_model, settings),
         fallback=_build_provider(settings.llm_fallback_provider, settings.llm_fallback_model, settings),
         classification=_build_provider(settings.llm_classification_provider, settings.llm_classification_model, settings),
         summary=_build_provider(settings.llm_summary_provider, settings.llm_summary_model, settings),
-        embeddings=_build_provider(settings.llm_embeddings_provider, settings.llm_embeddings_model, settings),
+        embeddings=embeddings,
     )
 
 
