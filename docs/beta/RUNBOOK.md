@@ -14,7 +14,7 @@
 - Verify `GET /health` and `GET /ready`.
 - Verify media worker diagnostics: `python -m app.media.worker --diagnose` (and `--fail-on-stall` for non-zero on suspected queue stall).
 - Verify `/api/web/auth/session` login and `/api/web/auth/refresh` rotation.
-- Verify `WEB_OWNER_TELEGRAM_ID` is configured; owner login/session issuance now rejects missing owner id.
+- Verify `WEB_OWNER_TELEGRAM_ID` is configured; owner login/session issuance rejects missing owner id and does not fallback to allowlist entries.
 - Verify `/api/web/admin/metrics/providers` and `/api/web/admin/alerts/unanswered`.
 - Verify `/api/web/admin/analytics/retrieval-quality` for retrieval hit/empty rates.
 - Verify router logs include `route_decision` and `reason` fields (JSON logs, `docker compose logs bot`).

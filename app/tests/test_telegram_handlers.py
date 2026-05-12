@@ -302,6 +302,39 @@ async def test_why_command_shows_trace(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_why_command_uses_evidence_fallback_when_trace_missing(monkeypatch):
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={}),
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1"),
+        ),
+    )
+    monkeypatch.setattr(handlers, "SessionRepo", lambda db: SimpleNamespace(get_active=lambda *a, **k: SimpleNamespace(id="s-1")))
+    monkeypatch.setattr(
+        handlers,
+        "MessageRepo",
+        lambda db: SimpleNamespace(
+            last_assistant=lambda *a, **k: SimpleNamespace(
+                metadata_={
+                    "safety": {"intent": "drug_interaction", "risk_tags": ["aminoglycoside_kidney_risk"]},
+                    "evidence": {"status": "needs_manual_check", "next_questions": ["Уточните ХБП/ХПН и текущие препараты."]},
+                }
+            )
+        ),
+    )
+    message = FakeMessage(user_id=1, text="/why")
+    await handlers.cmd_why(message)
+    text = message.answers[0]["text"]
+    assert "risk intent: drug_interaction" in text
+    assert "aminoglycoside_kidney_risk" in text
+    assert "Уточните ХБП/ХПН" in text
+
+
+@pytest.mark.asyncio
 async def test_today_command_builds_route_and_tracks_event(monkeypatch):
     tracked = []
     monkeypatch.setattr(handlers, "_check_allow", lambda message: True)

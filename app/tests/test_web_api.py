@@ -301,7 +301,8 @@ def test_web_login_supports_password_hash_and_refresh():
         assert auth.status_code == 200
         assert "access_token" in auth.json()
         assert SESSION_COOKIE in auth.cookies
-        refreshed = client.post("/api/web/auth/refresh", cookies={SESSION_COOKIE: auth.cookies.get(SESSION_COOKIE)})
+        client.cookies.set(SESSION_COOKIE, auth.cookies.get(SESSION_COOKIE))
+        refreshed = client.post("/api/web/auth/refresh")
         assert refreshed.status_code == 200
         assert refreshed.json()["access_token"] != auth.json()["access_token"]
     finally:

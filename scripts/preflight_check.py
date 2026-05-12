@@ -44,7 +44,7 @@ def check_env() -> list[tuple[str, str]]:
     rows.append(_ok("USER_ID_HASH_SALT is non-default") if _secret_ready(settings.user_id_hash_salt) else _fail("USER_ID_HASH_SALT is missing/default"))
     allowlist_present = bool(settings.allowed_user_ids or settings.allowed_usernames)
     rows.append(_ok("Telegram allowlist has entries") if allowlist_present else _fail("Telegram allowlist is empty"))
-    rows.append(_ok("WEB_OWNER_TELEGRAM_ID is set") if settings.web_owner_telegram_id else _warn("WEB_OWNER_TELEGRAM_ID not set; web falls back to first allowlist id"))
+    rows.append(_ok("WEB_OWNER_TELEGRAM_ID is set") if settings.web_owner_telegram_id else _fail("WEB_OWNER_TELEGRAM_ID is missing (owner web auth requires explicit owner id)"))
     password_ready = bool(settings.web_owner_password_hash) or _secret_ready(settings.web_owner_password, min_len=12)
     rows.append(_ok("WEB_OWNER_PASSWORD_HASH/password is configured") if password_ready else _fail("WEB_OWNER_PASSWORD_HASH/password is default/missing"))
     rows.append(_warn("WEB_OWNER_PASSWORD_HASH is preferred over plain password") if not settings.web_owner_password_hash else _ok("WEB_OWNER_PASSWORD_HASH is set"))

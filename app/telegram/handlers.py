@@ -31,15 +31,25 @@ from app.telegram.callbacks import parse_callback_data as _parse_callback_data
 from app.telegram.callbacks import callback_data as _signed_callback_data
 from app.telegram.ui import build_ai_reply_keyboard, build_main_menu_reply_keyboard, build_review_keyboard
 from app.telegram.formatting import TELEGRAM_HTML_PARSE_MODE, format_ai_answer_for_telegram, split_for_telegram, strip_telegram_html
+from app.telegram.onboarding import ONBOARDING_STEPS, REGION_VALUES, RESPONSE_DENSITY_VALUES, SPECIES_VALUES
+from app.telegram.onboarding import apply_response_density as _apply_response_density
+from app.telegram.onboarding import complete_onboarding_step as _complete_onboarding_step
+from app.telegram.onboarding import onboarding_state as _onboarding_state
+from app.telegram.onboarding import save_onboarding_state as _save_onboarding_state
+from app.telegram.onboarding import user_profile as _user_profile
+from app.telegram.ux import guided_clarification_keyboard as _guided_clarification_keyboard
+from app.telegram.ux import minimal_next_questions as _minimal_next_questions
+from app.telegram.ux import next_step_keyboard as _next_step_keyboard
+from app.telegram.ux import provider_error_text as _provider_error_text
+from app.telegram.ux import quota_error_text as _quota_error_text
+from app.telegram.ux import safety_error_text as _safety_error_text
+from app.telegram.ux import topic_required_text as _topic_required_text
+from app.telegram.ux import why_payload_for_meta as _why_payload_for_meta
 
 router = Router()
 logger = logging.getLogger("app.telegram.handlers")
 
 MODES = {"short", "practical", "deep", "exam", "protocol", "cards", "quiz", "evidence"}
-REGION_VALUES = {"us", "eu", "local", "unspecified"}
-SPECIES_VALUES = {"dog", "cat", "dog_cat"}
-RESPONSE_DENSITY_VALUES = {"quick", "balanced", "deep"}
-ONBOARDING_STEPS = ("bind_topic", "today_route", "first_case")
 CASE_LEVELS = ("basic", "intermediate", "advanced")
 DEFAULT_SUBJECTS = [
     ("pharmacology", "Фармакология", "Фокус на препаратах, дозах, противопоказаниях и рисках."),
@@ -48,6 +58,46 @@ DEFAULT_SUBJECTS = [
     ("anatomy", "Анатомия", "Фокус на структурной логике, ориентирах и экзаменационных связях."),
     ("general", "Общее", "Общие вопросы, кросс-темы и быстрые уточнения."),
 ]
+
+
+def _check_allow(message: Message) -> bool:
+    from app.config import get_settings
+
+    settings = get_settings()
+    allowed_ids = settings.allowed_user_ids
+    allowed_usernames = getattr(settings, "allowed_usernames", set())
+    if not allowed_ids and not allowed_usernames:
+        return True
+    user = message.from_user
+    if not user:
+        return False
+    if user.id in allowed_ids:
+        return True
+    username = (getattr(user, "username", "") or "").lstrip("@").lower()
+    return bool(username and username in allowed_usernames)
+
+
+async def _deny_if_not_allowed(message: Message) -> bool:
+    if _check_allow(message):
+        return False
+    user_id = getattr(getattr(message, "from_user", None), "id", "unknown")
+    await message.answer(f"Доступ запрещен. Ваш Telegram ID: {user_id}. Передайте его владельцу beta для allowlist.")
+    return True
+
+
+async def _deny_callback_if_not_allowed(query: CallbackQuery) -> bool:
+    settings = get_settings()
+    allowed_ids = settings.allowed_user_ids
+    allowed_usernames = getattr(settings, "allowed_usernames", set())
+    username = (getattr(query.from_user, "username", "") or "").lstrip("@").lower()
+    if not allowed_ids and not allowed_usernames:
+        return False
+    if query.from_user.id in allowed_ids or (username and username in allowed_usernames):
+        return False
+    await query.answer("Доступ запрещен.", show_alert=True)
+    if query.message:
+        await query.message.answer(f"Доступ запрещен. Ваш Telegram ID: {query.from_user.id}. Передайте его владельцу beta для allowlist.")
+    return True
 
 
 def _update_document_status(
@@ -211,46 +261,6 @@ async def _index_document_job(
         db.close()
 
 
-def _check_allow(message: Message) -> bool:
-    from app.config import get_settings
-
-    settings = get_settings()
-    allowed_ids = settings.allowed_user_ids
-    allowed_usernames = getattr(settings, "allowed_usernames", set())
-    if not allowed_ids and not allowed_usernames:
-        return True
-    user = message.from_user
-    if not user:
-        return False
-    if user.id in allowed_ids:
-        return True
-    username = (getattr(user, "username", "") or "").lstrip("@").lower()
-    return bool(username and username in allowed_usernames)
-
-
-async def _deny_if_not_allowed(message: Message) -> bool:
-    if _check_allow(message):
-        return False
-    user_id = getattr(getattr(message, "from_user", None), "id", "unknown")
-    await message.answer(f"Доступ запрещен. Ваш Telegram ID: {user_id}. Передайте его владельцу beta для allowlist.")
-    return True
-
-
-async def _deny_callback_if_not_allowed(query: CallbackQuery) -> bool:
-    settings = get_settings()
-    allowed_ids = settings.allowed_user_ids
-    allowed_usernames = getattr(settings, "allowed_usernames", set())
-    username = (getattr(query.from_user, "username", "") or "").lstrip("@").lower()
-    if not allowed_ids and not allowed_usernames:
-        return False
-    if query.from_user.id in allowed_ids or (username and username in allowed_usernames):
-        return False
-    await query.answer("Доступ запрещен.", show_alert=True)
-    if query.message:
-        await query.message.answer(f"Доступ запрещен. Ваш Telegram ID: {query.from_user.id}. Передайте его владельцу beta для allowlist.")
-    return True
-
-
 async def _try_ingest_answer(memory: MemoryService, *, db, user_id, topic_id, source_message_id, answer: str, title: str, kind: str) -> None:
     try:
         await memory.ingest_assistant_answer(
@@ -287,167 +297,6 @@ def _callback_data(action: str, payload: str = "") -> str:
 
 def parse_callback_data(data: str):
     return _parse_callback_data(data)
-
-
-def _topic_required_text(thread_id: int | None) -> str:
-    return (
-        f"Текущий thread id: {thread_id}\n"
-        "Этот Telegram topic пока не привязан к учебной теме.\n"
-        "Используйте: /bind_topic <slug_or_name>\n"
-        "Быстрый старт: /create_default_topics"
-    )
-
-
-def _provider_error_text() -> str:
-    return "Провайдер временно недоступен. Следующий шаг: проверьте /status и повторите через 1-2 минуты."
-
-
-def _quota_error_text() -> str:
-    return "Лимит запросов/бюджета исчерпан. Следующий шаг: переключитесь на /review или /today и попробуйте снова после обновления лимита."
-
-
-def _safety_error_text() -> str:
-    return "Для безопасного ответа не хватает данных. Следующий шаг: укажите вид, вес, возраст, симптомы и точный препарат/ситуацию."
-
-
-def _minimal_next_questions(*, safety=None, evidence_payload: dict | None = None, limit: int = 3) -> list[str]:
-    items: list[str] = []
-    for question in list(getattr(safety, "clarifying_questions", []) or []):
-        cleaned = str(question).strip()
-        if cleaned:
-            items.append(cleaned)
-    for question in list((evidence_payload or {}).get("next_questions", []) or []):
-        cleaned = str(question).strip()
-        if cleaned:
-            items.append(cleaned)
-    if not items:
-        items = [
-            "Уточните вид, вес, возраст и ключевые симптомы.",
-            "Уточните точный препарат/концентрацию/маршрут.",
-        ]
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for question in items:
-        key = question.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(question)
-    return deduped[:limit]
-
-
-def _guided_clarification_keyboard() -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton(text="⚖️ Вид/вес/возраст", callback_data=_callback_data("clarify_quick", "patient")),
-            InlineKeyboardButton(text="💊 Препарат/доза", callback_data=_callback_data("clarify_quick", "drug")),
-        ],
-        [InlineKeyboardButton(text="🧪 Симптомы/таймлайн", callback_data=_callback_data("clarify_quick", "timeline"))],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _why_payload_for_meta(meta: dict | None) -> dict:
-    payload = dict(meta or {})
-    safety_meta = dict(payload.get("safety") or {})
-    evidence_meta = dict(payload.get("evidence") or {})
-    return {
-        "risk_intent": safety_meta.get("intent"),
-        "risk_tags": list(safety_meta.get("risk_tags") or []),
-        "needs_manual_check": bool(evidence_meta.get("needs_manual_check")),
-        "manual_check_reasons": list(evidence_meta.get("manual_check_reasons") or []),
-        "missing_data": list(evidence_meta.get("next_questions") or []),
-        "verification_status": evidence_meta.get("verification_status") or evidence_meta.get("status"),
-    }
-
-
-def _next_step_keyboard(context: str) -> InlineKeyboardMarkup:
-    if context == "quota":
-        rows = [
-            [InlineKeyboardButton(text="🔁 Повторить /review", switch_inline_query_current_chat="/review")],
-            [InlineKeyboardButton(text="📅 Открыть /today", switch_inline_query_current_chat="/today light")],
-        ]
-    elif context == "provider":
-        rows = [
-            [InlineKeyboardButton(text="📊 Проверить /status", switch_inline_query_current_chat="/status")],
-            [InlineKeyboardButton(text="📅 Открыть /today", switch_inline_query_current_chat="/today standard")],
-        ]
-    else:
-        rows = [
-            [InlineKeyboardButton(text="🧾 Добавить клин.данные", switch_inline_query_current_chat="вид= вес= возраст= симптомы= препарат=")],
-            [InlineKeyboardButton(text="🩺 Учебный кейс /case", switch_inline_query_current_chat="/case basic")],
-        ]
-    if context == "learning":
-        rows = [
-            [InlineKeyboardButton(text="🩺 Перейти в /case", switch_inline_query_current_chat="/case basic")],
-            [InlineKeyboardButton(text="🔁 Перейти в /review", switch_inline_query_current_chat="/review")],
-        ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _onboarding_state(user) -> dict:
-    settings = dict(user.settings or {})
-    onboarding = dict(settings.get("onboarding") or {})
-    completed = [x for x in onboarding.get("completed_steps", []) if x in ONBOARDING_STEPS]
-    onboarding["completed_steps"] = sorted(set(completed), key=ONBOARDING_STEPS.index)
-    onboarding["is_completed"] = bool(onboarding.get("is_completed", False))
-    return onboarding
-
-
-def _save_onboarding_state(user, onboarding: dict) -> None:
-    settings = dict(user.settings or {})
-    settings["onboarding"] = onboarding
-    user.settings = settings
-    if onboarding.get("is_completed"):
-        user.onboarding_completed = True
-
-
-def _complete_onboarding_step(*, user, step: str, analytics: ProductAnalyticsService, topic_id=None) -> bool:
-    if step not in ONBOARDING_STEPS:
-        return False
-    onboarding = _onboarding_state(user)
-    completed = list(onboarding.get("completed_steps", []))
-    if step in completed:
-        return False
-    completed.append(step)
-    onboarding["completed_steps"] = sorted(set(completed), key=ONBOARDING_STEPS.index)
-    onboarding["is_completed"] = len(onboarding["completed_steps"]) >= len(ONBOARDING_STEPS)
-    _save_onboarding_state(user, onboarding)
-    analytics.track(
-        user_id=user.id,
-        topic_id=topic_id,
-        event_name="onboarding_step_completed",
-        properties={"step": step, "completed_steps": onboarding["completed_steps"]},
-    )
-    if onboarding["is_completed"]:
-        analytics.track(user_id=user.id, topic_id=topic_id, event_name="onboarding_completed", properties={"steps": onboarding["completed_steps"]})
-    return True
-
-
-def _user_profile(user) -> dict:
-    settings = dict(user.settings or {})
-    profile = dict(settings.get("profile") or {})
-    region = str(profile.get("region", "unspecified")).lower()
-    species_focus = str(profile.get("species_focus", "dog_cat")).lower()
-    if region not in REGION_VALUES:
-        region = "unspecified"
-    if species_focus not in SPECIES_VALUES:
-        species_focus = "dog_cat"
-    density = str(profile.get("response_density", "balanced")).lower()
-    if density not in RESPONSE_DENSITY_VALUES:
-        density = "balanced"
-    return {"region": region, "species_focus": species_focus, "response_density": density}
-
-
-def _apply_response_density(answer: str, density: str) -> str:
-    text = (answer or "").strip()
-    if density == "deep":
-        return text
-    limit = 900 if density == "quick" else 2200
-    if len(text) <= limit:
-        return text
-    tail = "\n\n[Сокращено под ваш режим. Для полного разбора: /profile density=deep]"
-    return f"{text[:limit].rstrip()}{tail}"
 
 
 def _build_document_learning_nudge(*, filename: str, chunks: list[str]) -> str:

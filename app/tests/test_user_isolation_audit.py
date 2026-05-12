@@ -47,9 +47,9 @@ def test_session_cookie_user_mismatch_is_rejected():
         auth = client.post('/api/web/auth/session', json={'password': settings.web_owner_password})
         assert auth.status_code == 200
         token = auth.cookies.get('vetstudy_session')
+        client.cookies.set('vetstudy_session', token)
         res = client.get(
             '/api/web/stats',
-            cookies={'vetstudy_session': token},
             headers={'X-User-Telegram-Id': '1001'},
         )
         assert res.status_code == 403

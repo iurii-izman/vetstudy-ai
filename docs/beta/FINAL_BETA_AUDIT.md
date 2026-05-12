@@ -11,7 +11,7 @@
 ## Что исправлено во время аудита
 
 - Web API теперь требует bearer token для пользовательских endpoints, а не доверяет одному `X-User-Telegram-Id`.
-- Web cabinet может работать после логина без ручной передачи `X-User-Telegram-Id`: owner берется из `WEB_OWNER_TELEGRAM_ID`, с fallback на первый `ALLOWED_TELEGRAM_USER_IDS`.
+- Web cabinet может работать после логина без ручной передачи `X-User-Telegram-Id`: owner берется из `WEB_OWNER_TELEGRAM_ID`; при отсутствии owner id логин/сессия отклоняются.
 - Web topics теперь видят реальные Telegram topics, которые имеют `user_id=NULL`, но используются в сессиях/памяти/карточках пользователя.
 - Inline-кнопки Telegram под ответом больше не заглушки: `Сохранить`, `Карточки`, `Тест`, `Связанные темы`, `Кратко`, `Глубже` выполняют реальные действия.
 - `/help` теперь показывает `/review`, `/docs`, `/export`.

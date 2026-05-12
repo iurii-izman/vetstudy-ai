@@ -24,6 +24,7 @@ Quality degradation definition for release gate:
 - Validate at least one production provider key is set in deployment secrets.
 - Confirm fallback provider/model configured.
 - For `APP_ENV=prod`, confirm embeddings preflight requirements: non-mock provider, model set, matching provider key.
+- Confirm `WEB_OWNER_TELEGRAM_ID` is explicitly set (owner session issuance rejects missing owner id; no allowlist fallback).
 
 4. Observability and cost safety
 - Confirm `model_calls` rows are being written for each AI request.
