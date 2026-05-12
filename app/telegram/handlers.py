@@ -26,8 +26,9 @@ from app.media.storage import download_telegram_file
 from app.media.types import FileTooLargeError, UnsupportedMediaError
 from app.memory.service import MemoryService
 from app.evidence import EvidenceService
+from app.errors import is_retryable_db_error, map_pipeline_error
 from app.quotas import QuotaGuard
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 from app.services import llm_router, prompt_manager, safety_gate
 from app.telegram.formatting import TELEGRAM_HTML_PARSE_MODE, format_ai_answer_for_telegram, split_for_telegram, strip_telegram_html
 
@@ -525,7 +526,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             return
         except SQLAlchemyError as exc:
             db.rollback()
-            if isinstance(exc, OperationalError) and attempt == 0:
+            if is_retryable_db_error(exc) and attempt == 0:
                 logger.warning("db_error_retrying_once", extra={"event": "telegram_pipeline_db_retry", "error_category": "db_error"})
                 await asyncio.sleep(2)
                 continue
@@ -537,7 +538,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 details={"topic_id": str(topic.id), "message_id": message.message_id},
             )
             logger.exception("db_error_in_pipeline", extra={"event": "telegram_pipeline_error", "error_category": "db_error"})
-            await message.answer("Ошибка базы данных. Попробуйте чуть позже.")
+            await message.answer(map_pipeline_error(exc).user_message)
             return
         except RuntimeError:
             ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "provider"})
@@ -548,11 +549,12 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 details={"topic_id": str(topic.id), "message_id": message.message_id},
             )
             logger.exception("provider_runtime_error", extra={"event": "telegram_pipeline_error", "error_category": "provider_error"})
-            await message.answer(_provider_error_text())
+            await message.answer(map_pipeline_error(RuntimeError("provider")).user_message)
             return
         except Exception as exc:
-            if "quota" in str(exc).lower() or "429" in str(exc):
-                await message.answer(_quota_error_text())
+            mapped = map_pipeline_error(exc)
+            if mapped.category == "quota_error":
+                await message.answer(mapped.user_message)
                 return
             ErrorEventRepo(db).add(
                 user_id=user.id,
@@ -562,7 +564,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             )
             ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "unexpected"})
             logger.exception("pipeline_failed", extra={"event": "telegram_pipeline_error", "error_category": "telegram_error"})
-            await message.answer("Временная ошибка обработки. Попробуйте ещё раз.")
+            await message.answer(mapped.user_message)
             return
         finally:
             db.close()
@@ -1360,17 +1362,18 @@ async def cmd_case_answer(message: Message):
             )
         except Exception:
             pass
-    except RuntimeError:
+    except RuntimeError as exc:
         ErrorEventRepo(db).add(
             user_id=user.id,
             scope="telegram",
             category="case_eval_provider_error",
             details={"case_id": case_id},
         )
-        await message.answer(_provider_error_text())
+        await message.answer(map_pipeline_error(exc).user_message)
     except Exception as exc:
-        if "quota" in str(exc).lower() or "429" in str(exc):
-            await message.answer(_quota_error_text())
+        mapped = map_pipeline_error(exc)
+        if mapped.category == "quota_error":
+            await message.answer(mapped.user_message)
         else:
             ErrorEventRepo(db).add(
                 user_id=user.id,
@@ -1378,7 +1381,7 @@ async def cmd_case_answer(message: Message):
                 category="case_eval_unexpected_error",
                 details={"case_id": case_id, "error": str(exc)},
             )
-            await message.answer("Временная ошибка. Попробуйте ещё раз.")
+            await message.answer(mapped.user_message)
     finally:
         db.close()
 

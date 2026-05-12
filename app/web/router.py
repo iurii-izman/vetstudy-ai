@@ -674,36 +674,72 @@ def admin_unanswered_alerts(
     if not _allow_admin_rate_limit(user):
         raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
-    cutoff = datetime.now(UTC)
-    sessions = db.execute(select(ChatSession)).scalars().all()
+    now_ts = datetime.now(UTC)
+    last_user_cte = (
+        select(
+            Message.session_id.label("session_id"),
+            func.max(Message.created_at).label("last_user_created_at"),
+        )
+        .where(Message.role == "user")
+        .group_by(Message.session_id)
+        .cte("last_user")
+    )
+    last_assistant_cte = (
+        select(
+            Message.session_id.label("session_id"),
+            func.max(Message.created_at).label("last_assistant_created_at"),
+        )
+        .where(Message.role == "assistant")
+        .group_by(Message.session_id)
+        .cte("last_assistant")
+    )
+    last_user_message_cte = (
+        select(
+            Message.session_id.label("session_id"),
+            Message.id.label("message_id"),
+            Message.content.label("content"),
+            Message.created_at.label("created_at"),
+        )
+        .join(
+            last_user_cte,
+            (Message.session_id == last_user_cte.c.session_id)
+            & (Message.created_at == last_user_cte.c.last_user_created_at),
+        )
+        .where(Message.role == "user")
+        .cte("last_user_message")
+    )
+
+    rows = db.execute(
+        select(
+            ChatSession.id,
+            ChatSession.user_id,
+            last_user_message_cte.c.message_id,
+            last_user_message_cte.c.content,
+            last_user_message_cte.c.created_at,
+            last_assistant_cte.c.last_assistant_created_at,
+        )
+        .join(last_user_message_cte, last_user_message_cte.c.session_id == ChatSession.id)
+        .outerjoin(last_assistant_cte, last_assistant_cte.c.session_id == ChatSession.id)
+        .where(
+            or_(
+                last_assistant_cte.c.last_assistant_created_at.is_(None),
+                last_assistant_cte.c.last_assistant_created_at < last_user_message_cte.c.created_at,
+            )
+        )
+    ).all()
+
     alerts: list[dict] = []
-    for session in sessions:
-        last_user = db.execute(
-            select(Message)
-            .where(Message.session_id == session.id, Message.role == "user")
-            .order_by(Message.created_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        if not last_user:
-            continue
-        last_assistant = db.execute(
-            select(Message)
-            .where(Message.session_id == session.id, Message.role == "assistant")
-            .order_by(Message.created_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        if last_assistant and last_assistant.created_at >= last_user.created_at:
-            continue
-        age_minutes = int((cutoff - last_user.created_at).total_seconds() / 60)
+    for session_id, user_id, message_id, content, created_at, _ in rows:
+        age_minutes = int((now_ts - created_at).total_seconds() / 60)
         if age_minutes < older_than_minutes:
             continue
         alerts.append(
             {
-                "session_id": session.id,
-                "user_id": session.user_id,
-                "last_user_message_id": last_user.id,
+                "session_id": session_id,
+                "user_id": user_id,
+                "last_user_message_id": message_id,
                 "age_minutes": age_minutes,
-                "preview": last_user.content[:240],
+                "preview": (content or "")[:240],
             }
         )
     return alerts
