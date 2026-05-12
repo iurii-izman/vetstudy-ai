@@ -1,17 +1,14 @@
 import asyncio
-from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
-import hmac
 import logging
 from pathlib import Path
-import time
 from uuid import UUID, uuid4
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup
 from app.config import get_settings
 
 from app.analytics import ProductAnalyticsService
@@ -26,9 +23,13 @@ from app.media.storage import download_telegram_file
 from app.media.types import FileTooLargeError, UnsupportedMediaError
 from app.memory.service import MemoryService
 from app.evidence import EvidenceService
+from app.errors import is_retryable_db_error, map_pipeline_error
 from app.quotas import QuotaGuard
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 from app.services import llm_router, prompt_manager, safety_gate
+from app.telegram.callbacks import parse_callback_data as _parse_callback_data
+from app.telegram.callbacks import callback_data as _signed_callback_data
+from app.telegram.ui import build_ai_reply_keyboard, build_main_menu_reply_keyboard, build_review_keyboard
 from app.telegram.formatting import TELEGRAM_HTML_PARSE_MODE, format_ai_answer_for_telegram, split_for_telegram, strip_telegram_html
 
 router = Router()
@@ -37,6 +38,9 @@ logger = logging.getLogger("app.telegram.handlers")
 MODES = {"short", "practical", "deep", "exam", "protocol", "cards", "quiz", "evidence"}
 REGION_VALUES = {"us", "eu", "local", "unspecified"}
 SPECIES_VALUES = {"dog", "cat", "dog_cat"}
+RESPONSE_DENSITY_VALUES = {"quick", "balanced", "deep"}
+ONBOARDING_STEPS = ("bind_topic", "today_route", "first_case")
+CASE_LEVELS = ("basic", "intermediate", "advanced")
 DEFAULT_SUBJECTS = [
     ("pharmacology", "Фармакология", "Фокус на препаратах, дозах, противопоказаниях и рисках."),
     ("surgery", "Хирургия", "Фокус на хирургической тактике и послеоперационном ведении."),
@@ -44,8 +48,6 @@ DEFAULT_SUBJECTS = [
     ("anatomy", "Анатомия", "Фокус на структурной логике, ориентирах и экзаменационных связях."),
     ("general", "Общее", "Общие вопросы, кросс-темы и быстрые уточнения."),
 ]
-CALLBACK_TTL_BUCKETS = 12
-CALLBACK_BUCKET_SECONDS = 300
 
 
 def _update_document_status(
@@ -104,6 +106,7 @@ async def _index_document_job(
     db = new_session()
     try:
         doc_repo = DocumentRepo(db)
+        user = UserRepo(db).get_or_create(telegram_user_id, display_name)
         doc = doc_repo.get_by_job_id(job_id or "") if hasattr(db, "execute") else None
         if doc and doc.status in {"indexed", "failed"}:
             return
@@ -112,7 +115,6 @@ async def _index_document_job(
         text = extract_document_text(stored_path, original_name)
         chunks = chunk_text(text)
         if not doc and hasattr(db, "execute"):
-            user = UserRepo(db).get_or_create(telegram_user_id, display_name)
             doc = doc_repo.create_or_get(user_id=user.id, topic_id=topic_id, filename=original_name, size_bytes=stored_path.stat().st_size, job_id=job_id or str(uuid4()))
         mem = MemoryRepo(db)
         chunk_repo = DocumentChunkRepo(db)
@@ -144,6 +146,16 @@ async def _index_document_job(
                 tags=["document", f"doc:{original_name}"],
                 embedding=vectors[i] if i < len(vectors) else None,
             )
+        nudge_text = _build_document_learning_nudge(filename=original_name, chunks=chunks)
+        settings = dict(user.settings or {})
+        settings["last_document_learning_nudge"] = {
+            "job_id": job_id,
+            "filename": original_name,
+            "topic_id": str(topic_id),
+            "text": nudge_text,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        user.settings = settings
         if doc and hasattr(db, "execute"):
             doc_repo.update_status(document=doc, status="indexed", chunks=len(chunks))
         _update_document_status(
@@ -197,12 +209,6 @@ async def _index_document_job(
         raise
     finally:
         db.close()
-
-
-@dataclass(frozen=True)
-class ActionCallback:
-    action: str
-    payload: str = ""
 
 
 def _check_allow(message: Message) -> bool:
@@ -264,76 +270,23 @@ async def _try_ingest_answer(memory: MemoryService, *, db, user_id, topic_id, so
 
 
 def _build_ai_reply_keyboard() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="💾 Сохранить", callback_data=_callback_data("save"))],
-        [InlineKeyboardButton(text="⚡ Кратко", callback_data=_callback_data("short")), InlineKeyboardButton(text="🔎 Глубже", callback_data=_callback_data("deeper"))],
-        [InlineKeyboardButton(text="🧠 Карточки", callback_data=_callback_data("cards")), InlineKeyboardButton(text="🧪 Тест", callback_data=_callback_data("test"))],
-        [InlineKeyboardButton(text="🧭 Связанные темы", callback_data=_callback_data("related"))],
-        [InlineKeyboardButton(text="👍", callback_data=_callback_data("fb_up")), InlineKeyboardButton(text="👎", callback_data=_callback_data("fb_down")), InlineKeyboardButton(text="ошибка", callback_data=_callback_data("fb_error"))],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return build_ai_reply_keyboard()
 
 
 def _build_review_keyboard(card_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="😵 Again", callback_data=_callback_data("review_again", card_id)),
-                InlineKeyboardButton(text="😬 Hard", callback_data=_callback_data("review_hard", card_id)),
-            ],
-            [InlineKeyboardButton(text="🙂 Good", callback_data=_callback_data("review_good", card_id)), InlineKeyboardButton(text="😎 Easy", callback_data=_callback_data("review_easy", card_id))],
-            [InlineKeyboardButton(text="👁 Показать ответ", callback_data=_callback_data("review_reveal", card_id))],
-        ]
-    )
+    return build_review_keyboard(card_id)
 
 
 def _build_main_menu_reply_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📅 На сегодня"), KeyboardButton(text="🩺 Кейсы")],
-            [KeyboardButton(text="🧠 Карточки"), KeyboardButton(text="➕ Создать")],
-            [KeyboardButton(text="📚 Темы"), KeyboardButton(text="⚙️ Профиль")],
-        ],
-        resize_keyboard=True,
-        persistent=True,
-    )
-
-
-def _callback_secret() -> str:
-    settings = get_settings()
-    return getattr(settings, "user_id_hash_salt", "") or getattr(settings, "web_owner_token", "") or "dev-callback-secret"
-
-
-def _callback_signature(action: str, payload: str, bucket: int) -> str:
-    raw = f"{action}:{payload}:{bucket}".encode("utf-8")
-    return hmac.new(_callback_secret().encode("utf-8"), raw, hashlib.sha256).hexdigest()[:10]
+    return build_main_menu_reply_keyboard()
 
 
 def _callback_data(action: str, payload: str = "") -> str:
-    bucket = int(time.time() // CALLBACK_BUCKET_SECONDS)
-    return f"vx:{action}:{payload}:{_callback_signature(action, payload, bucket)}"
+    return _signed_callback_data(action, payload)
 
 
-def _valid_callback_signature(action: str, payload: str, signature: str) -> bool:
-    current = int(time.time() // CALLBACK_BUCKET_SECONDS)
-    for bucket in range(current, current - CALLBACK_TTL_BUCKETS - 1, -1):
-        if hmac.compare_digest(signature, _callback_signature(action, payload, bucket)):
-            return True
-    return False
-
-
-def parse_callback_data(data: str) -> ActionCallback | None:
-    if not data.startswith("vx:"):
-        return None
-    parts = data.split(":", 3)
-    if len(parts) != 4:
-        return None
-    _, action, payload, signature = parts
-    if not action:
-        return None
-    if not _valid_callback_signature(action, payload, signature):
-        return None
-    return ActionCallback(action=action, payload=payload)
+def parse_callback_data(data: str):
+    return _parse_callback_data(data)
 
 
 def _topic_required_text(thread_id: int | None) -> str:
@@ -346,11 +299,129 @@ def _topic_required_text(thread_id: int | None) -> str:
 
 
 def _provider_error_text() -> str:
-    return "LLM-провайдер временно недоступен. Проверьте ключи/лимиты и повторите позже."
+    return "Провайдер временно недоступен. Следующий шаг: проверьте /status и повторите через 1-2 минуты."
 
 
 def _quota_error_text() -> str:
-    return "Лимит запросов или бюджета исчерпан. Попробуйте позже."
+    return "Лимит запросов/бюджета исчерпан. Следующий шаг: переключитесь на /review или /today и попробуйте снова после обновления лимита."
+
+
+def _safety_error_text() -> str:
+    return "Для безопасного ответа не хватает данных. Следующий шаг: укажите вид, вес, возраст, симптомы и точный препарат/ситуацию."
+
+
+def _minimal_next_questions(*, safety=None, evidence_payload: dict | None = None, limit: int = 3) -> list[str]:
+    items: list[str] = []
+    for question in list(getattr(safety, "clarifying_questions", []) or []):
+        cleaned = str(question).strip()
+        if cleaned:
+            items.append(cleaned)
+    for question in list((evidence_payload or {}).get("next_questions", []) or []):
+        cleaned = str(question).strip()
+        if cleaned:
+            items.append(cleaned)
+    if not items:
+        items = [
+            "Уточните вид, вес, возраст и ключевые симптомы.",
+            "Уточните точный препарат/концентрацию/маршрут.",
+        ]
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for question in items:
+        key = question.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(question)
+    return deduped[:limit]
+
+
+def _guided_clarification_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(text="⚖️ Вид/вес/возраст", callback_data=_callback_data("clarify_quick", "patient")),
+            InlineKeyboardButton(text="💊 Препарат/доза", callback_data=_callback_data("clarify_quick", "drug")),
+        ],
+        [InlineKeyboardButton(text="🧪 Симптомы/таймлайн", callback_data=_callback_data("clarify_quick", "timeline"))],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _why_payload_for_meta(meta: dict | None) -> dict:
+    payload = dict(meta or {})
+    safety_meta = dict(payload.get("safety") or {})
+    evidence_meta = dict(payload.get("evidence") or {})
+    return {
+        "risk_intent": safety_meta.get("intent"),
+        "risk_tags": list(safety_meta.get("risk_tags") or []),
+        "needs_manual_check": bool(evidence_meta.get("needs_manual_check")),
+        "manual_check_reasons": list(evidence_meta.get("manual_check_reasons") or []),
+        "missing_data": list(evidence_meta.get("next_questions") or []),
+        "verification_status": evidence_meta.get("verification_status") or evidence_meta.get("status"),
+    }
+
+
+def _next_step_keyboard(context: str) -> InlineKeyboardMarkup:
+    if context == "quota":
+        rows = [
+            [InlineKeyboardButton(text="🔁 Повторить /review", switch_inline_query_current_chat="/review")],
+            [InlineKeyboardButton(text="📅 Открыть /today", switch_inline_query_current_chat="/today light")],
+        ]
+    elif context == "provider":
+        rows = [
+            [InlineKeyboardButton(text="📊 Проверить /status", switch_inline_query_current_chat="/status")],
+            [InlineKeyboardButton(text="📅 Открыть /today", switch_inline_query_current_chat="/today standard")],
+        ]
+    else:
+        rows = [
+            [InlineKeyboardButton(text="🧾 Добавить клин.данные", switch_inline_query_current_chat="вид= вес= возраст= симптомы= препарат=")],
+            [InlineKeyboardButton(text="🩺 Учебный кейс /case", switch_inline_query_current_chat="/case basic")],
+        ]
+    if context == "learning":
+        rows = [
+            [InlineKeyboardButton(text="🩺 Перейти в /case", switch_inline_query_current_chat="/case basic")],
+            [InlineKeyboardButton(text="🔁 Перейти в /review", switch_inline_query_current_chat="/review")],
+        ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _onboarding_state(user) -> dict:
+    settings = dict(user.settings or {})
+    onboarding = dict(settings.get("onboarding") or {})
+    completed = [x for x in onboarding.get("completed_steps", []) if x in ONBOARDING_STEPS]
+    onboarding["completed_steps"] = sorted(set(completed), key=ONBOARDING_STEPS.index)
+    onboarding["is_completed"] = bool(onboarding.get("is_completed", False))
+    return onboarding
+
+
+def _save_onboarding_state(user, onboarding: dict) -> None:
+    settings = dict(user.settings or {})
+    settings["onboarding"] = onboarding
+    user.settings = settings
+    if onboarding.get("is_completed"):
+        user.onboarding_completed = True
+
+
+def _complete_onboarding_step(*, user, step: str, analytics: ProductAnalyticsService, topic_id=None) -> bool:
+    if step not in ONBOARDING_STEPS:
+        return False
+    onboarding = _onboarding_state(user)
+    completed = list(onboarding.get("completed_steps", []))
+    if step in completed:
+        return False
+    completed.append(step)
+    onboarding["completed_steps"] = sorted(set(completed), key=ONBOARDING_STEPS.index)
+    onboarding["is_completed"] = len(onboarding["completed_steps"]) >= len(ONBOARDING_STEPS)
+    _save_onboarding_state(user, onboarding)
+    analytics.track(
+        user_id=user.id,
+        topic_id=topic_id,
+        event_name="onboarding_step_completed",
+        properties={"step": step, "completed_steps": onboarding["completed_steps"]},
+    )
+    if onboarding["is_completed"]:
+        analytics.track(user_id=user.id, topic_id=topic_id, event_name="onboarding_completed", properties={"steps": onboarding["completed_steps"]})
+    return True
 
 
 def _user_profile(user) -> dict:
@@ -362,7 +433,42 @@ def _user_profile(user) -> dict:
         region = "unspecified"
     if species_focus not in SPECIES_VALUES:
         species_focus = "dog_cat"
-    return {"region": region, "species_focus": species_focus}
+    density = str(profile.get("response_density", "balanced")).lower()
+    if density not in RESPONSE_DENSITY_VALUES:
+        density = "balanced"
+    return {"region": region, "species_focus": species_focus, "response_density": density}
+
+
+def _apply_response_density(answer: str, density: str) -> str:
+    text = (answer or "").strip()
+    if density == "deep":
+        return text
+    limit = 900 if density == "quick" else 2200
+    if len(text) <= limit:
+        return text
+    tail = "\n\n[Сокращено под ваш режим. Для полного разбора: /profile density=deep]"
+    return f"{text[:limit].rstrip()}{tail}"
+
+
+def _build_document_learning_nudge(*, filename: str, chunks: list[str]) -> str:
+    lines = [
+        f"Документ `{filename}` проиндексирован.",
+        "Рекомендация: 3 ключевые карточки + 1 мини-кейс.",
+        "",
+        "Карточки:",
+    ]
+    for idx, chunk in enumerate(chunks[:3], start=1):
+        snippet = " ".join(chunk.split())[:170]
+        lines.append(f"{idx}. Что важно по теме #{idx}? -> {snippet} [chunk:{idx}]")
+    seed = " ".join((chunks[0] if chunks else "").split())[:180] or "Клинический фрагмент из документа."
+    lines.extend(
+        [
+            "",
+            f"Мини-кейс: пациент с похожим профилем из `{filename}`. Разберите triage и первый шаг диагностики. Основа: {seed} [chunk:1]",
+            "Действия: /cards doc | /quiz | /save",
+        ]
+    )
+    return "\n".join(lines)
 
 
 async def _send_typing(message: Message) -> None:
@@ -404,7 +510,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             await _send_typing(message)
             quota = QuotaGuard(get_settings()).check_user_and_global(db, user)
             if not quota.allowed:
-                await message.answer(quota.message or "Лимит исчерпан.")
+                await message.answer(quota.message or _quota_error_text(), reply_markup=_next_step_keyboard("quota"))
                 return
             chat_db = ChatDBService(db)
             preferred_mode = (user.settings or {}).get("mode", "practical")
@@ -422,10 +528,17 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             )
             safety = safety_gate.check(text)
             if not safety.allowed:
-                warn = safety.warning or "Недостаточно данных."
-                if safety.clarifying_questions:
-                    warn = f"{warn}\n\n" + "\n".join(f"- {q}" for q in safety.clarifying_questions)
-                await message.answer(warn)
+                warn = safety.warning or _safety_error_text()
+                next_questions = _minimal_next_questions(safety=safety)
+                warn = f"{warn}\n\n" + "\n".join(f"- {q}" for q in next_questions)
+                analytics.track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    session_id=session.id,
+                    event_name="safety_clarification_required",
+                    properties={"risk_tags": getattr(safety, "risk_tags", [])},
+                )
+                await message.answer(warn, reply_markup=_guided_clarification_keyboard())
                 return
             memory = MemoryService(MemoryRepo(db), topic_repo=TopicRepo(db), embedder=llm_router, chunk_repo=DocumentChunkRepo(db))
             search_results = await memory.search(db=db, user_id=user.id, query=text, current_topic_id=topic.id, top_k=5, cross_topic=True)
@@ -490,9 +603,15 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 rendered_answer = evidence.render_markdown(evidence_resp)
                 evidence_payload = {
                     "status": evidence_resp.status,
+                    "verification_status": evidence_resp.verification_status,
                     "citations": evidence_resp.citations,
+                    "trust_indicators": evidence_resp.trust_indicators,
                     "needs_manual_check": evidence_resp.needs_manual_check,
+                    "manual_check_reasons": evidence_resp.manual_check_reasons,
+                    "next_questions": evidence_resp.next_questions,
                 }
+            followup_questions = _minimal_next_questions(safety=safety, evidence_payload=evidence_payload)
+            rendered_answer = _apply_response_density(rendered_answer, profile["response_density"])
             assistant_msg = chat_db.save_assistant_message(
                 session.id,
                 rendered_answer,
@@ -502,6 +621,13 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                     "effective_mode": effective_mode,
                     "high_risk": high_risk,
                     "evidence": evidence_payload,
+                    "why_trace": {
+                        "risk_intent": getattr(safety, "intent", None),
+                        "risk_tags": list(getattr(safety, "risk_tags", []) or []),
+                        "needs_manual_check": bool((evidence_payload or {}).get("needs_manual_check")),
+                        "manual_check_reasons": list((evidence_payload or {}).get("manual_check_reasons", []) or []),
+                        "missing_data": followup_questions,
+                    },
                 },
             )
             analytics.track(
@@ -511,7 +637,19 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 event_name="activation_first_answer",
                 properties={"effective_mode": effective_mode, "high_risk": high_risk},
             )
+            if (metadata or {}).get("source_type") == "voice":
+                analytics.track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    session_id=session.id,
+                    event_name="voice_summary_generated",
+                    properties={"response_density": profile["response_density"]},
+                )
+            needs_followup = bool((evidence_payload or {}).get("status") in {"needs_manual_check", "partially_verified"})
             await _send_ai_answer(message, rendered_answer)
+            if needs_followup and followup_questions:
+                guidance = "Чтобы повысить уверенность ответа, уточните:\n" + "\n".join(f"- {q}" for q in followup_questions)
+                await message.answer(guidance, reply_markup=_guided_clarification_keyboard())
             await _try_ingest_answer(
                 memory,
                 db=db,
@@ -525,7 +663,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             return
         except SQLAlchemyError as exc:
             db.rollback()
-            if isinstance(exc, OperationalError) and attempt == 0:
+            if is_retryable_db_error(exc) and attempt == 0:
                 logger.warning("db_error_retrying_once", extra={"event": "telegram_pipeline_db_retry", "error_category": "db_error"})
                 await asyncio.sleep(2)
                 continue
@@ -537,7 +675,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 details={"topic_id": str(topic.id), "message_id": message.message_id},
             )
             logger.exception("db_error_in_pipeline", extra={"event": "telegram_pipeline_error", "error_category": "db_error"})
-            await message.answer("Ошибка базы данных. Попробуйте чуть позже.")
+            await message.answer(map_pipeline_error(exc).user_message)
             return
         except RuntimeError:
             ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "provider"})
@@ -548,11 +686,12 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 details={"topic_id": str(topic.id), "message_id": message.message_id},
             )
             logger.exception("provider_runtime_error", extra={"event": "telegram_pipeline_error", "error_category": "provider_error"})
-            await message.answer(_provider_error_text())
+            await message.answer(_provider_error_text(), reply_markup=_next_step_keyboard("provider"))
             return
         except Exception as exc:
-            if "quota" in str(exc).lower() or "429" in str(exc):
-                await message.answer(_quota_error_text())
+            mapped = map_pipeline_error(exc)
+            if mapped.category == "quota_error":
+                await message.answer(_quota_error_text(), reply_markup=_next_step_keyboard("quota"))
                 return
             ErrorEventRepo(db).add(
                 user_id=user.id,
@@ -562,7 +701,10 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             )
             ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "unexpected"})
             logger.exception("pipeline_failed", extra={"event": "telegram_pipeline_error", "error_category": "telegram_error"})
-            await message.answer("Временная ошибка обработки. Попробуйте ещё раз.")
+            await message.answer(
+                "Временная ошибка обработки. Следующий шаг: повторите запрос или используйте /today для продолжения обучения.",
+                reply_markup=_next_step_keyboard("provider"),
+            )
             return
         finally:
             db.close()
@@ -576,17 +718,24 @@ async def cmd_start(message: Message):
     try:
         try:
             user = UserRepo(db).get_or_create(message.from_user.id, message.from_user.full_name if message.from_user else None)
+            analytics = ProductAnalyticsService(db)
             ProductAnalyticsService(db).track(user_id=user.id, event_name="activation_start")
+            onboarding = _onboarding_state(user)
+            if not onboarding:
+                onboarding = {"completed_steps": [], "is_completed": False}
+                _save_onboarding_state(user, onboarding)
+                analytics.track(user_id=user.id, event_name="onboarding_started", properties={"steps_total": len(ONBOARDING_STEPS)})
+                db.commit()
         except Exception:
             logger.debug("activation_start_track_failed", exc_info=True)
     finally:
         db.close()
     await message.answer(
-        "VetStudy AI готов.\n"
-        "Для работы используйте кнопки меню или команды:\n"
-        "1) /create_default_topics\n"
-        "2) или /bind_topic <slug_or_name>\n"
-        "3) задайте вопрос в topic\n",
+        "VetStudy AI готов. Онбординг (3 шага):\n"
+        "1) Привяжи учебный topic: /create_default_topics или /bind_topic <slug_or_name>\n"
+        "2) Открой персональный маршрут: /today\n"
+        "3) Запусти клинический кейс: /case basic\n\n"
+        "CTA: начни с шага 1 прямо сейчас.",
         reply_markup=_build_main_menu_reply_keyboard(),
     )
 
@@ -627,8 +776,9 @@ async def cmd_help(message: Message):
         return
     await message.answer(
         "Онбординг:\n/start\n/status\n/topics\n/create_default_topics\n/bind_topic <slug_or_name>\n\n"
-        "Сессия:\n/new\n/mode\n/evidence\n/save\n/search\n/summary\n/profile\n\n"
-        "Обучение:\n/today\n/cards\n/review\n/quiz\n/export\n\n"
+        "Сессия:\n/new\n/mode\n/evidence\n/why\n/save\n/search\n/summary\n/profile\n\n"
+        "Обучение:\n/today [light|standard|intensive]\n/plan_week\n/cards\n/review\n/quiz\n/export\n\n"
+        "Отчет:\n/weekly\n\n"
         "Клинические кейсы:\n/case — выбрать виртуальный кейс\n/case_answer — отправить анализ на оценку\n\n"
         "Система:\n/docs\n/help",
     )
@@ -648,7 +798,8 @@ async def cmd_profile(message: Message, command: CommandObject):
                 "Профиль:\n"
                 f"- region: {current['region']}\n"
                 f"- species_focus: {current['species_focus']}\n\n"
-                "Изменить: /profile region=<us|eu|local|unspecified> species=<dog|cat|dog_cat>"
+                f"- response_density: {current['response_density']}\n\n"
+                "Изменить: /profile region=<us|eu|local|unspecified> species=<dog|cat|dog_cat> density=<quick|balanced|deep>"
             )
             return
         updates = dict(current)
@@ -661,12 +812,17 @@ async def cmd_profile(message: Message, command: CommandObject):
                 updates["region"] = value
             if key == "species" and value in SPECIES_VALUES:
                 updates["species_focus"] = value
+            if key == "density" and value in RESPONSE_DENSITY_VALUES:
+                updates["response_density"] = value
         settings = dict(user.settings or {})
         settings["profile"] = updates
         user.settings = settings
         db.commit()
         ProductAnalyticsService(db).track(user_id=user.id, event_name="profile_updated", properties=updates)
-        await message.answer(f"Профиль обновлен: region={updates['region']}, species_focus={updates['species_focus']}")
+        await message.answer(
+            "Профиль обновлен: "
+            f"region={updates['region']}, species_focus={updates['species_focus']}, response_density={updates['response_density']}"
+        )
     finally:
         db.close()
 
@@ -730,6 +886,14 @@ async def cmd_docs(message: Message):
             lines.append(f"- {row.filename} | status={row.status} | size={row.size_bytes} bytes")
         for item in docs[-20:]:
             lines.append(f"- {item.get('filename')} | status={item.get('status')} | size={item.get('size_bytes')} bytes")
+        nudge = (user.settings or {}).get("last_document_learning_nudge") or {}
+        if nudge.get("text"):
+            lines.extend(["", "Proactive learning:", str(nudge.get("text"))])
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                event_name="document_learning_nudge_viewed",
+                properties={"job_id": nudge.get("job_id"), "filename": nudge.get("filename")},
+            )
         await message.answer("\n".join(lines))
     finally:
         db.close()
@@ -783,6 +947,8 @@ async def cmd_bind_topic(message: Message, command: CommandObject):
             event_name="activation_topic_bound",
             properties={"subject": subject.slug},
         )
+        _complete_onboarding_step(user=user, step="bind_topic", analytics=ProductAnalyticsService(db), topic_id=topic.id)
+        db.commit()
         await message.answer(
             f"Привязано: '{topic.title}' (slug={subject.slug}) к thread id {message.message_thread_id}.",
         )
@@ -890,6 +1056,50 @@ async def cmd_mode(message: Message, command: CommandObject):
 @router.message(Command("evidence"))
 async def cmd_evidence(message: Message):
     await cmd_mode(message, CommandObject(command="/mode", args="evidence"))
+
+
+@router.message(Command("why"))
+async def cmd_why(message: Message):
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        chat_db = ChatDBService(db)
+        user = chat_db.ensure_user(message.from_user.id, message.from_user.full_name if message.from_user else None)
+        topic = chat_db.get_topic_for_chat_thread(message.chat.id, message.message_thread_id)
+        if not topic or not topic.subject_id:
+            await message.answer(_topic_required_text(message.message_thread_id))
+            return
+        session = SessionRepo(db).get_active(user.id, topic.id)
+        if not session:
+            await message.answer("Нет активной сессии. Сначала задайте вопрос.")
+            return
+        last = MessageRepo(db).last_assistant(session.id)
+        if not last:
+            await message.answer("Пока нет ответа для explain-режима.")
+            return
+        meta = dict(last.metadata_ or {})
+        trace = dict(meta.get("why_trace") or _why_payload_for_meta(meta))
+        risk_tags = list(trace.get("risk_tags") or [])
+        reasons = list(trace.get("manual_check_reasons") or [])
+        missing_data = list(trace.get("missing_data") or [])
+        lines = [
+            "Explain (/why) для последнего ответа:",
+            f"- risk intent: {trace.get('risk_intent') or 'unknown'}",
+            f"- risk tags: {', '.join(risk_tags) if risk_tags else 'none'}",
+        ]
+        needs_manual = bool(trace.get("needs_manual_check"))
+        lines.append(f"- needs_manual_check: {'yes' if needs_manual else 'no'}")
+        if reasons:
+            lines.append("- почему needs_manual_check:")
+            lines.extend([f"  • {item}" for item in reasons[:3]])
+        if missing_data:
+            lines.append("- каких данных не хватило:")
+            lines.extend([f"  • {item}" for item in missing_data[:3]])
+        lines.append("Без внутренних системных промптов и секретов.")
+        await message.answer("\n".join(lines))
+    finally:
+        db.close()
 
 
 @router.message(Command("summary"))
@@ -1032,6 +1242,15 @@ async def cmd_cards(message: Message, command: CommandObject):
             source_message_id = selected.source_message_id
             tags.extend(selected.tags or [])
             tags.append("search")
+        elif source in {"doc", "document"}:
+            nudge = (user.settings or {}).get("last_document_learning_nudge") or {}
+            text = str(nudge.get("text") or "")
+            tags.extend(["document", "document_recap"])
+            source_message_id = None
+            source = "document"
+            if not text:
+                await message.answer("Нет готового document recap. Сначала дождитесь индексации и откройте /docs.")
+                return
         else:
             if not session:
                 await message.answer("Нет активной сессии.")
@@ -1083,6 +1302,13 @@ async def cmd_cards(message: Message, command: CommandObject):
             event_name="cards_created",
             properties={"count": len(cards), "source": source or "answer"},
         )
+        if source == "document":
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                topic_id=topic.id,
+                event_name="document_to_cards_converted",
+                properties={"count": len(cards)},
+            )
         ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="activation_first_cards")
         preview = "\n\n".join(f"Q: {c.front}\nA: {c.back}" for c in cards[:5])
         await message.answer(f"Сгенерировано карточек: {len(cards)}\n\n{preview}")
@@ -1150,7 +1376,7 @@ async def cmd_review(message: Message):
 
 
 @router.message(Command("today"))
-async def cmd_today(message: Message):
+async def cmd_today(message: Message, command: CommandObject | None = None):
     if await _deny_if_not_allowed(message):
         return
     db = new_session()
@@ -1161,23 +1387,132 @@ async def cmd_today(message: Message):
         if not topic or not topic.subject_id:
             await message.answer(_topic_required_text(message.message_thread_id))
             return
-        route = LearningService().build_daily_route(db=db, user_id=user.id, topic_id=topic.id)
-        ProductAnalyticsService(db).track(
+        requested_mode = ((command.args or "").strip().lower() if command else "") or "standard"
+        route = LearningService().build_daily_route(db=db, user_id=user.id, topic_id=topic.id, mode=requested_mode)
+        streak_days, relaunch_days = LearningService().compute_streak(db=db, user_id=user.id)
+        analytics = ProductAnalyticsService(db)
+        analytics.track(
             user_id=user.id,
             topic_id=topic.id,
             event_name="learning_route_opened",
-            properties={"used_fallback": route.used_fallback, "due_count": route.due_count},
+            properties={
+                "mode": route.mode,
+                "plan_minutes": route.plan_minutes,
+                "used_fallback": route.used_fallback,
+                "due_count": route.due_count,
+                "weak_topics_count": len(route.weak_topics),
+                "zero_result_searches": route.zero_result_searches,
+                "negative_feedback_count": route.negative_feedback_count,
+                "high_risk_block_count": route.high_risk_block_count,
+                "streak_days": streak_days,
+            },
         )
+        if streak_days in {3, 7, 14, 30}:
+            analytics.track(user_id=user.id, topic_id=topic.id, event_name="streak_milestone_reached", properties={"days": streak_days})
+        if relaunch_days > 0:
+            analytics.track(user_id=user.id, topic_id=topic.id, event_name="learning_relaunched", properties={"after_days": relaunch_days})
+        if relaunch_days >= 3:
+            analytics.track(user_id=user.id, topic_id=topic.id, event_name="return_after_dropout_nudge", properties={"dropout_days": relaunch_days})
+        _complete_onboarding_step(user=user, step="today_route", analytics=analytics, topic_id=topic.id)
         lines = [
-            "Маршрут на 15-30 минут:",
+            f"Маршрут на {route.plan_minutes} минут ({route.mode}):",
             f"1) Мини-кейс: {route.mini_case}",
             f"2) Препарат/риск: {route.drug_risk}",
-            f"3) Карточки к сроку: {route.due_count}",
+            f"3) Повтор: карточки к сроку {route.due_count}",
             "4) Повтори 3 карточки:",
         ]
         for idx, card_front in enumerate(route.review_cards[:3], start=1):
             lines.append(f"   {idx}. {card_front}")
+        if route.weak_topics:
+            lines.append(f"Слабые темы: {', '.join(route.weak_topics)}")
+        if route.zero_result_searches > 0:
+            lines.append(f"Zero-result поисков за 7 дней: {route.zero_result_searches}")
+        if route.negative_feedback_count > 0:
+            lines.append(f"Негативный feedback за 7 дней: {route.negative_feedback_count}")
+        if route.high_risk_block_count > 0:
+            lines.append(f"High-risk блокировок за 7 дней: {route.high_risk_block_count}")
+        lines.append(f"Streak: {streak_days} дн.")
         lines.append(f"5) Reflection: {route.reflection_question}")
+        if relaunch_days > 0:
+            lines.append(f"Возврат после паузы: {relaunch_days} дн. Отличный рестарт, продолжай в комфортном темпе.")
+        if relaunch_days >= 3:
+            lines.append("Мягкий сценарий возврата: начни с /today light, затем закрой 2 карточки через /review.")
+        if route.high_risk_block_count >= 3:
+            lines.append("Много high-risk блокировок: переключаемся на безопасный тренировочный кейс /case basic.")
+        await message.answer("\n".join(lines), reply_markup=_next_step_keyboard("learning"))
+    finally:
+        db.close()
+
+
+@router.message(Command("plan_week"))
+async def cmd_plan_week(message: Message):
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        chat_db = ChatDBService(db)
+        user = chat_db.ensure_user(message.from_user.id, message.from_user.full_name if message.from_user else None)
+        topic = chat_db.get_topic_for_chat_thread(message.chat.id, message.message_thread_id)
+        if not topic or not topic.subject_id:
+            await message.answer(_topic_required_text(message.message_thread_id))
+            return
+        plan = LearningService().build_week_plan(db=db, user_id=user.id, topic_id=topic.id)
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            topic_id=topic.id,
+            event_name="weekly_plan_opened",
+            properties={
+                "days": len(plan.days),
+                "overdue_count": plan.overdue_count,
+                "streak_days": plan.streak_days,
+                "weak_topics_count": len(plan.weak_topics),
+            },
+        )
+        lines = [
+            "Персональный план на 7 дней:",
+            f"Streak: {plan.streak_days} дн., overdue карточек: {plan.overdue_count}",
+        ]
+        for day in plan.days:
+            lines.append(
+                f"День {day.day_index} [{day.mode}] {day.focus}: {day.mini_case} | /case x1, /review x{day.review_target}, /quiz x{day.quiz_target}"
+            )
+        await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🩺 Начать /case", switch_inline_query_current_chat="/case basic")],
+            [InlineKeyboardButton(text="🔁 Начать /review", switch_inline_query_current_chat="/review")],
+            [InlineKeyboardButton(text="🧪 Начать /quiz", switch_inline_query_current_chat="/quiz 3")],
+        ]))
+    finally:
+        db.close()
+
+
+@router.message(Command("weekly"))
+async def cmd_weekly(message: Message):
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        chat_db = ChatDBService(db)
+        user = chat_db.ensure_user(message.from_user.id, message.from_user.full_name if message.from_user else None)
+        recap = LearningService().build_weekly_recap(db=db, user_id=user.id)
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            event_name="weekly_recap_opened",
+            properties={
+                "cards_created": recap.cards_created,
+                "cards_reviewed": recap.cards_reviewed,
+                "high_risk_queries": recap.high_risk_queries,
+                "questions_asked": recap.questions_asked,
+            },
+        )
+        lines = [
+            "Weekly recap (7 дней):",
+            f"- Cards created: {recap.cards_created}",
+            f"- Review done: {recap.cards_reviewed}",
+            f"- High-risk questions: {recap.high_risk_queries}",
+            f"- Questions asked: {recap.questions_asked}",
+        ]
+        if recap.weak_topics:
+            lines.append(f"- Weak topics: {', '.join(recap.weak_topics)}")
         await message.answer("\n".join(lines))
     finally:
         db.close()
@@ -1189,12 +1524,23 @@ async def cmd_today(message: Message):
 from app.cases import CASES, CASE_EDUCATIONAL_DISCLAIMER, get_case_by_id  # noqa: E402
 
 
-def _case_select_keyboard() -> InlineKeyboardMarkup:
+def _case_select_keyboard(level: str | None = None) -> InlineKeyboardMarkup:
+    items = _cases_for_level(level) if level in CASE_LEVELS else CASES
     rows = [
         [InlineKeyboardButton(text=c["title"], callback_data=_callback_data("case_select", c["id"]))]
-        for c in CASES
+        for c in items
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _case_level_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Basic", callback_data=_callback_data("case_level", "basic"))],
+            [InlineKeyboardButton(text="Intermediate", callback_data=_callback_data("case_level", "intermediate"))],
+            [InlineKeyboardButton(text="Advanced", callback_data=_callback_data("case_level", "advanced"))],
+        ]
+    )
 
 
 def _case_answer_keyboard(case_id: str) -> InlineKeyboardMarkup:
@@ -1208,6 +1554,50 @@ def _case_answer_keyboard(case_id: str) -> InlineKeyboardMarkup:
 
 def _get_user_case_id(user) -> str | None:
     return (user.settings or {}).get("active_case_id")
+
+
+def _get_case_level(user) -> str:
+    settings = dict(user.settings or {})
+    level = str(settings.get("case_level", "basic")).lower()
+    if level not in CASE_LEVELS:
+        return "basic"
+    return level
+
+
+def _set_case_level(user, level: str) -> None:
+    settings = dict(user.settings or {})
+    settings["case_level"] = level if level in CASE_LEVELS else "basic"
+    user.settings = settings
+
+
+def _case_level_for_case(case_id: str) -> str:
+    if case_id in {"vomiting_dog", "nsaid_risk_dog", "bloody_diarrhea_puppy", "seizure_dog"}:
+        return "basic"
+    if case_id in {"dyspnea_cat", "pyometra_suspicion", "blocked_cat"}:
+        return "intermediate"
+    return "advanced"
+
+
+def _cases_for_level(level: str) -> list[dict]:
+    return [item for item in CASES if _case_level_for_case(item["id"]) == level] or CASES
+
+
+def _apply_case_progression(user, submitted_level: str) -> tuple[str, dict]:
+    settings = dict(user.settings or {})
+    progress = dict(settings.get("case_progress") or {})
+    completed = dict(progress.get("completed") or {})
+    completed[submitted_level] = int(completed.get(submitted_level, 0) or 0) + 1
+    next_level = _get_case_level(user)
+    if submitted_level == "basic" and completed.get("basic", 0) >= 2:
+        next_level = "intermediate"
+    elif submitted_level == "intermediate" and completed.get("intermediate", 0) >= 2:
+        next_level = "advanced"
+    progress["completed"] = completed
+    progress["updated_at"] = datetime.now(UTC).isoformat()
+    settings["case_progress"] = progress
+    settings["case_level"] = next_level
+    user.settings = settings
+    return next_level, progress
 
 
 def _set_user_case_id(user, case_id: str | None) -> None:
@@ -1230,7 +1620,13 @@ async def cmd_case(message: Message, command: CommandObject):
             message.from_user.id,
             message.from_user.full_name if message.from_user else None,
         )
-        args = (command.args or "").strip()
+        args = (command.args or "").strip().lower()
+        if args in CASE_LEVELS:
+            _set_case_level(user, args)
+            db.commit()
+            ProductAnalyticsService(db).track(user_id=user.id, event_name="case_difficulty_selected", properties={"level": args, "source": "command"})
+            await message.answer(f"Уровень кейсов: {args}. Выбирай кейс:", reply_markup=_case_select_keyboard(args))
+            return
         if args:
             # Direct selection by id
             case = get_case_by_id(args)
@@ -1242,8 +1638,9 @@ async def cmd_case(message: Message, command: CommandObject):
             ProductAnalyticsService(db).track(
                 user_id=user.id,
                 event_name="case_started",
-                properties={"case_id": case["id"], "case_title": case["title"]},
+                properties={"case_id": case["id"], "case_title": case["title"], "difficulty": _case_level_for_case(case["id"]), "selected_level": _get_case_level(user)},
             )
+            _complete_onboarding_step(user=user, step="first_case", analytics=ProductAnalyticsService(db))
             text = (
                 f"<b>{case['title']}</b>\n\n"
                 f"{case['description']}"
@@ -1253,8 +1650,8 @@ async def cmd_case(message: Message, command: CommandObject):
             await _answer_telegram_html(message, text, reply_markup=_case_answer_keyboard(case["id"]))
         else:
             await message.answer(
-                "Выбери учебный кейс:",
-                reply_markup=_case_select_keyboard(),
+                f"Выбери уровень и кейс (текущий уровень: {_get_case_level(user)}):",
+                reply_markup=_case_level_keyboard(),
             )
     finally:
         db.close()
@@ -1297,7 +1694,7 @@ async def cmd_case_answer(message: Message):
         await _send_typing(message)
         quota = QuotaGuard(get_settings()).check_user_and_global(db, user)
         if not quota.allowed:
-            await message.answer(quota.message or "Лимит исчерпан.")
+            await message.answer(_quota_error_text())
             return
 
         prompt = prompt_manager.build_case_eval(
@@ -1309,9 +1706,15 @@ async def cmd_case_answer(message: Message):
         ProductAnalyticsService(db).track(
             user_id=user.id,
             event_name="case_submitted",
-            properties={"case_id": case_id, "answer_len": len(student_answer)},
+            properties={"case_id": case_id, "answer_len": len(student_answer), "difficulty": _case_level_for_case(case_id), "selected_level": _get_case_level(user)},
         )
         answer = await llm_router.generate(db, user.id, prompt, purpose="case_eval")
+        next_level, progress = _apply_case_progression(user, _case_level_for_case(case_id))
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            event_name="case_progression_updated",
+            properties={"submitted_level": _case_level_for_case(case_id), "next_level": next_level, "completed": progress.get("completed", {})},
+        )
 
         # Save to session if possible
         topic = TopicRepo(db).get_by_chat_thread(message.chat.id, message.message_thread_id)
@@ -1354,7 +1757,7 @@ async def cmd_case_answer(message: Message):
         try:
             await message.answer(
                 "⚠️ <i>Это учебная обратная связь, а не клиническое заключение. "
-                "Для реального животного — очная консультация ветеринара.</i>",
+                f"Для реального животного — очная консультация ветеринара.</i>\nСледующий уровень: <b>{next_level}</b>",
                 parse_mode=TELEGRAM_HTML_PARSE_MODE,
                 reply_markup=fb_keyboard,
             )
@@ -1369,7 +1772,8 @@ async def cmd_case_answer(message: Message):
         )
         await message.answer(_provider_error_text())
     except Exception as exc:
-        if "quota" in str(exc).lower() or "429" in str(exc):
+        mapped = map_pipeline_error(exc)
+        if mapped.category == "quota_error":
             await message.answer(_quota_error_text())
         else:
             ErrorEventRepo(db).add(
@@ -1378,7 +1782,7 @@ async def cmd_case_answer(message: Message):
                 category="case_eval_unexpected_error",
                 details={"case_id": case_id, "error": str(exc)},
             )
-            await message.answer("Временная ошибка. Попробуйте ещё раз.")
+            await message.answer("Временная ошибка кейса. Следующий шаг: сократите ответ до ключевых пунктов и повторите /case_answer.")
     finally:
         db.close()
 
@@ -1509,8 +1913,9 @@ async def on_ai_action(query: CallbackQuery):
             ProductAnalyticsService(db).track(
                 user_id=user.id,
                 event_name="case_started",
-                properties={"case_id": case["id"], "case_title": case["title"]},
+                properties={"case_id": case["id"], "case_title": case["title"], "difficulty": _case_level_for_case(case["id"]), "selected_level": _get_case_level(user)},
             )
+            _complete_onboarding_step(user=user, step="first_case", analytics=ProductAnalyticsService(db))
         finally:
             db.close()
         if query.message:
@@ -1527,12 +1932,38 @@ async def on_ai_action(query: CallbackQuery):
                 await query.message.answer(text, parse_mode=TELEGRAM_HTML_PARSE_MODE,
                                            reply_markup=_case_answer_keyboard(case["id"]))
         return
+    if parsed.action == "case_level":
+        level = parsed.payload if parsed.payload in CASE_LEVELS else "basic"
+        db = new_session()
+        try:
+            user = UserRepo(db).get_or_create(
+                query.from_user.id,
+                query.from_user.full_name if query.from_user else None,
+            )
+            _set_case_level(user, level)
+            db.commit()
+            ProductAnalyticsService(db).track(user_id=user.id, event_name="case_difficulty_selected", properties={"level": level, "source": "callback"})
+        finally:
+            db.close()
+        if query.message:
+            await query.message.answer(f"Уровень: {level}. Выбери кейс:", reply_markup=_case_select_keyboard(level))
+        return
     if parsed.action == "case_list":
         if query.message:
+            level = "basic"
+            db = new_session()
             try:
-                await query.message.edit_text("Выбери учебный кейс:", reply_markup=_case_select_keyboard())
+                user = UserRepo(db).get_or_create(
+                    query.from_user.id,
+                    query.from_user.full_name if query.from_user else None,
+                )
+                level = _get_case_level(user)
+            finally:
+                db.close()
+            try:
+                await query.message.edit_text(f"Выбери учебный кейс ({level}):", reply_markup=_case_select_keyboard(level))
             except Exception:
-                await query.message.answer("Выбери учебный кейс:", reply_markup=_case_select_keyboard())
+                await query.message.answer(f"Выбери учебный кейс ({level}):", reply_markup=_case_select_keyboard(level))
         return
     if parsed.action == "case_fb":
         db = new_session()
@@ -1550,6 +1981,17 @@ async def on_ai_action(query: CallbackQuery):
             db.close()
         if query.message:
             await query.message.answer("Спасибо за обратную связь! Используй /case для следующего кейса.")
+        return
+    if parsed.action == "clarify_quick":
+        if not query.message:
+            return
+        templates = {
+            "patient": "Заполни: вид= ; вес_кг= ; возраст= ; пол/стерилизация= .",
+            "drug": "Заполни: препарат= ; концентрация= ; маршрут= ; частота= ; источник(label/SPC/formulary)= .",
+            "timeline": "Заполни: ключевые симптомы= ; длительность= ; динамика= ; red_flags= .",
+        }
+        text = templates.get(parsed.payload, "Добавьте минимальные клинические данные: вид, вес, возраст, симптомы, препарат.")
+        await query.message.answer(text)
         return
     # ── General feedback ────────────────────────────────────────────────────
     if parsed.action in {"fb_up", "fb_down", "fb_error"}:
@@ -1747,6 +2189,23 @@ async def on_voice(message: Message):
         await message.answer("Не удалось распознать аудио: провайдер transcription не настроен или временно недоступен.")
         return
     await message.answer(f"Транскрипт: {transcript}")
+    await message.answer(
+        "Structured summary:\n"
+        f"- source: voice ({stored.original_name})\n"
+        f"- key point: {transcript[:180]}\n"
+        "- next action: уточни клинический контекст или перейди к тренировке\n"
+        "Actions: /cards | /quiz | /save"
+    )
+    db = new_session()
+    try:
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            topic_id=topic.id,
+            event_name="voice_summary_offered",
+            properties={"file_name": stored.original_name},
+        )
+    finally:
+        db.close()
     await _run_text_pipeline(message, user, topic, transcript, metadata={"source_type": "voice", "file_name": stored.original_name})
 
 
@@ -1794,7 +2253,26 @@ async def on_image_or_document(message: Message):
             parts.append(f"Vision: {vision_text[:800]}")
         if not ocr_text and not vision_text:
             parts.append("Невозможно обработать изображение: OCR/Vision провайдеры отключены или недоступны.")
+        else:
+            parts.append(
+                "Structured summary:\n"
+                f"- source: image ({stored.original_name})\n"
+                f"- extracted: {(ocr_text or vision_text)[:180]}\n"
+                "- next action: проверь контекст и выбери учебный формат\n"
+                "Actions: /cards | /quiz | /save"
+            )
         await message.answer("\n\n".join(parts))
+        if ocr_text or vision_text:
+            db = new_session()
+            try:
+                user = UserRepo(db).get_or_create(message.from_user.id, message.from_user.full_name if message.from_user else None)
+                ProductAnalyticsService(db).track(
+                    user_id=user.id,
+                    event_name="voice_or_image_summary_offered",
+                    properties={"source_type": "photo" if is_photo else "image_document"},
+                )
+            finally:
+                db.close()
         return
 
     allowed_ext = {".pdf", ".docx", ".txt", ".md"}

@@ -21,6 +21,9 @@ DEFAULT_STREAM = "media:document_index_jobs"
 DEFAULT_GROUP = "media-indexers"
 DEFAULT_BLOCK_MS = 1000
 DEFAULT_RECLAIM_IDLE_MS = 900_000
+DEFAULT_STALL_WARN_AFTER_S = 600
+DEFAULT_STALL_PENDING_THRESHOLD = 10
+DEFAULT_STALL_LOG_INTERVAL_S = 60
 
 _worker_task: asyncio.Task | None = None
 _worker_stop_event: asyncio.Event | None = None
@@ -106,6 +109,62 @@ def _redis():
     return redis_from_url(_redis_url(), encoding="utf-8", decode_responses=True)
 
 
+def _stall_warn_after_s() -> int:
+    return int(getattr(get_settings(), "media_jobs_stall_warn_after_s", DEFAULT_STALL_WARN_AFTER_S))
+
+
+def _stall_pending_threshold() -> int:
+    return int(getattr(get_settings(), "media_jobs_stall_pending_threshold", DEFAULT_STALL_PENDING_THRESHOLD))
+
+
+def _stall_log_interval_s() -> int:
+    return int(getattr(get_settings(), "media_jobs_stall_log_interval_s", DEFAULT_STALL_LOG_INTERVAL_S))
+
+
+async def worker_diagnostics() -> dict[str, Any]:
+    redis = _redis()
+    try:
+        await ensure_group(redis)
+        stream = _stream_name()
+        group = _group_name()
+        stream_info = await redis.xinfo_stream(stream)
+        groups_info = await redis.xinfo_groups(stream)
+        pending_summary = await redis.xpending(stream, group)
+        pending_count = int(pending_summary.get("pending", 0))
+        oldest_pending_seconds = 0.0
+        oldest_pending_message_id = None
+        if pending_count > 0:
+            pending_range = await redis.xpending_range(stream, group, "-", "+", 1)
+            if pending_range:
+                oldest = pending_range[0]
+                idle_ms = oldest.get("time_since_delivered", 0)
+                oldest_pending_seconds = round(float(idle_ms) / 1000.0, 3)
+                oldest_pending_message_id = oldest.get("message_id")
+        return {
+            "status": "ok",
+            "stream": stream,
+            "group": group,
+            "stream_length": int(stream_info.get("length", 0)),
+            "groups": [
+                {
+                    "name": str(g.get("name", "")),
+                    "consumers": int(g.get("consumers", 0)),
+                    "pending": int(g.get("pending", 0)),
+                    "lag": int(g.get("lag", 0)),
+                    "last_delivered_id": str(g.get("last-delivered-id", "")),
+                }
+                for g in groups_info
+            ],
+            "pending_count": pending_count,
+            "oldest_pending_seconds": oldest_pending_seconds,
+            "oldest_pending_message_id": oldest_pending_message_id,
+            "stall_threshold_pending": _stall_pending_threshold(),
+            "stall_threshold_seconds": _stall_warn_after_s(),
+        }
+    finally:
+        await redis.aclose()
+
+
 async def enqueue_document_index(job: DocumentIndexJob) -> str:
     redis = _redis()
     try:
@@ -171,6 +230,7 @@ async def worker_loop() -> None:
     redis = _redis()
     consumer = _consumer_name()
     backoff_s = 1.0
+    last_stall_log_ts = 0.0
     try:
         await ensure_group(redis)
         logger.info("media_worker_started", extra={"stream": _stream_name(), "group": _group_name(), "consumer": consumer})
@@ -190,6 +250,28 @@ async def worker_loop() -> None:
                     for message_id, fields in messages:
                         await _handle_stream_message(redis, message_id, fields)
                 backoff_s = 1.0
+                now = asyncio.get_running_loop().time()
+                if now - last_stall_log_ts >= max(1, _stall_log_interval_s()):
+                    pending_summary = await redis.xpending(_stream_name(), _group_name())
+                    pending_count = int(pending_summary.get("pending", 0))
+                    if pending_count >= _stall_pending_threshold():
+                        pending_range = await redis.xpending_range(_stream_name(), _group_name(), "-", "+", 1)
+                        oldest_idle_ms = pending_range[0].get("time_since_delivered", 0) if pending_range else 0
+                        oldest_pending_seconds = float(oldest_idle_ms) / 1000.0
+                        if oldest_pending_seconds >= _stall_warn_after_s():
+                            logger.warning(
+                                "media_queue_stall_suspected",
+                                extra={
+                                    "event": "media_queue_stall_suspected",
+                                    "error_category": "queue_stall",
+                                    "stream": _stream_name(),
+                                    "group": _group_name(),
+                                    "consumer": consumer,
+                                    "pending_count": pending_count,
+                                    "oldest_pending_seconds": round(oldest_pending_seconds, 3),
+                                },
+                            )
+                    last_stall_log_ts = now
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

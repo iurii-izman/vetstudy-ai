@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     media_jobs_consumer: str = ""
     media_jobs_block_ms: int = 1000
     media_jobs_reclaim_idle_ms: int = 900_000
+    media_jobs_stall_warn_after_s: int = 600
+    media_jobs_stall_pending_threshold: int = 10
+    media_jobs_stall_log_interval_s: int = 60
     media_storage_path: str = "./data/uploads"
     max_voice_file_size_bytes: int = 20 * 1024 * 1024
     max_image_file_size_bytes: int = 10 * 1024 * 1024

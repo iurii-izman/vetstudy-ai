@@ -52,6 +52,11 @@ class JsonFormatter(logging.Formatter):
             "path",
             "method",
             "status_code",
+            "stream",
+            "group",
+            "consumer",
+            "pending_count",
+            "oldest_pending_seconds",
         ):
             value = getattr(record, key, None)
             if value is not None:

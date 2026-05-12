@@ -264,6 +264,44 @@ async def test_mode_evidence_allowed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_why_command_shows_trace(monkeypatch):
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={}),
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1"),
+        ),
+    )
+    monkeypatch.setattr(handlers, "SessionRepo", lambda db: SimpleNamespace(get_active=lambda *a, **k: SimpleNamespace(id="s-1")))
+    monkeypatch.setattr(
+        handlers,
+        "MessageRepo",
+        lambda db: SimpleNamespace(
+            last_assistant=lambda *a, **k: SimpleNamespace(
+                metadata_={
+                    "why_trace": {
+                        "risk_intent": "dosage_request",
+                        "risk_tags": ["dosage", "nsaids_in_cats"],
+                        "needs_manual_check": True,
+                        "manual_check_reasons": ["Нет точной концентрации."],
+                        "missing_data": ["Уточните вид и вес."],
+                    }
+                }
+            )
+        ),
+    )
+    message = FakeMessage(user_id=1, text="/why")
+    await handlers.cmd_why(message)
+    text = message.answers[0]["text"]
+    assert "risk intent: dosage_request" in text
+    assert "needs_manual_check: yes" in text
+    assert "Без внутренних системных промптов" in text
+
+
+@pytest.mark.asyncio
 async def test_today_command_builds_route_and_tracks_event(monkeypatch):
     tracked = []
     monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
@@ -285,21 +323,92 @@ async def test_today_command_builds_route_and_tracks_event(monkeypatch):
         handlers.LearningService,
         "build_daily_route",
         lambda self, **kwargs: SimpleNamespace(
+            mode="standard",
+            plan_minutes=25,
             mini_case="Собака с диареей: дифференциалы?",
             drug_risk="НПВС у кошек: check kidney and hydration.",
             due_count=4,
             review_cards=["Q1", "Q2", "Q3"],
             reflection_question="Что проверишь первым?",
             used_fallback=False,
+            weak_topics=["Терапия"],
+            zero_result_searches=1,
+            negative_feedback_count=1,
+            high_risk_block_count=4,
         ),
     )
+    monkeypatch.setattr(handlers.LearningService, "compute_streak", lambda self, **kwargs: (3, 0))
     message = FakeMessage(user_id=1, text="/today")
     await handlers.cmd_today(message)
     assert message.answers
     text = message.answers[0]["text"]
-    assert "Маршрут на 15-30 минут" in text
-    assert "Карточки к сроку: 4" in text
+    assert "Маршрут на 25 минут (standard)" in text
+    assert "карточки к сроку 4" in text.lower()
+    assert "Zero-result поисков" in text
+    assert "High-risk блокировок" in text
+    assert "Streak: 3 дн." in text
     assert tracked and tracked[0]["event_name"] == "learning_route_opened"
+
+
+@pytest.mark.asyncio
+async def test_weekly_command_outputs_recap(monkeypatch):
+    tracked = []
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={})),
+    )
+    monkeypatch.setattr(
+        handlers.LearningService,
+        "build_weekly_recap",
+        lambda self, **kwargs: SimpleNamespace(
+            cards_created=6,
+            cards_reviewed=9,
+            high_risk_queries=2,
+            questions_asked=14,
+            weak_topics=["Кардио"],
+        ),
+    )
+    monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)))
+    message = FakeMessage(user_id=1, text="/weekly")
+    await handlers.cmd_weekly(message)
+    assert "Weekly recap" in message.answers[0]["text"]
+    assert "Кардио" in message.answers[0]["text"]
+    assert tracked and tracked[0]["event_name"] == "weekly_recap_opened"
+
+
+@pytest.mark.asyncio
+async def test_plan_week_command_outputs_plan(monkeypatch):
+    tracked = []
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={}),
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1"),
+        ),
+    )
+    monkeypatch.setattr(
+        handlers.LearningService,
+        "build_week_plan",
+        lambda self, **kwargs: SimpleNamespace(
+            days=[SimpleNamespace(day_index=1, mode="light", focus="Терапия", mini_case="Кейс", review_target=2, quiz_target=1, planned_commands=["/case", "/review", "/quiz"])],
+            weak_topics=["Терапия"],
+            overdue_count=3,
+            streak_days=4,
+            relaunch_days=0,
+        ),
+    )
+    monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)))
+    message = FakeMessage(user_id=1, text="/plan_week")
+    await handlers.cmd_plan_week(message)
+    assert "Персональный план на 7 дней" in message.answers[0]["text"]
+    assert "/case x1" in message.answers[0]["text"]
+    assert tracked and tracked[0]["event_name"] == "weekly_plan_opened"
 
 
 @pytest.mark.asyncio
@@ -309,10 +418,11 @@ async def test_profile_command_updates_settings(monkeypatch):
     monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
     monkeypatch.setattr(handlers, "UserRepo", lambda db: SimpleNamespace(get_or_create=lambda *a, **k: user))
     monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **k: None))
-    message = FakeMessage(user_id=1, text="/profile region=eu species=cat")
-    await handlers.cmd_profile(message, SimpleNamespace(args="region=eu species=cat"))
+    message = FakeMessage(user_id=1, text="/profile region=eu species=cat density=quick")
+    await handlers.cmd_profile(message, SimpleNamespace(args="region=eu species=cat density=quick"))
     assert user.settings["profile"]["region"] == "eu"
     assert user.settings["profile"]["species_focus"] == "cat"
+    assert user.settings["profile"]["response_density"] == "quick"
 
 
 @pytest.mark.asyncio
@@ -325,8 +435,9 @@ async def test_split_long_answer(monkeypatch):
     monkeypatch.setattr(handlers.llm_router, "generate", _generate)
     message = FakeMessage()
     await handlers.on_text(message)
-    assert len(message.answers) > 1
+    assert message.answers
     assert all(len(item["text"]) <= 3900 for item in message.answers)
+    assert "density=deep" in message.answers[-1]["text"]
 
 
 def test_callback_parsing():
@@ -336,6 +447,14 @@ def test_callback_parsing():
     assert parsed.payload == "123"
     assert handlers.parse_callback_data("invalid") is None
     assert handlers.parse_callback_data("vx:cards:123:bad-signature") is None
+
+
+def test_review_keyboard_uses_signed_callbacks():
+    markup = handlers._build_review_keyboard("card-1")
+    callback_values = [button.callback_data for row in markup.inline_keyboard for button in row]
+    assert callback_values
+    assert all(isinstance(value, str) and value.startswith("vx:") for value in callback_values)
+    assert all(handlers.parse_callback_data(value) is not None for value in callback_values)
 
 
 @pytest.mark.asyncio
@@ -410,6 +529,7 @@ async def test_voice_transcribes_and_answers(monkeypatch, tmp_path):
     message.voice = SimpleNamespace(file_id="1", file_size=12)
     await handlers.on_voice(message)
     assert any("Транскрипт" in a["text"] for a in message.answers)
+    assert any("Structured summary" in a["text"] for a in message.answers)
 
 
 @pytest.mark.asyncio
@@ -466,6 +586,19 @@ async def test_callback_save_creates_note(monkeypatch):
     assert saved
     assert saved[0]["kind"] == "note"
     assert any("Сохранено" in item["text"] for item in query.message.answers)
+
+
+@pytest.mark.asyncio
+async def test_callback_clarify_quick(monkeypatch):
+    monkeypatch.setattr(handlers, "get_settings", lambda: SimpleNamespace(allowed_user_ids={7}))
+    query = SimpleNamespace(
+        data=handlers._callback_data("clarify_quick", "drug"),
+        from_user=SimpleNamespace(id=7, full_name="U"),
+        answer=lambda *a, **k: _async_return(None),
+        message=FakeMessage(),
+    )
+    await handlers.on_ai_action(query)
+    assert any("препарат=" in item["text"] for item in query.message.answers)
 
 @pytest.mark.asyncio
 async def test_review_shows_leech_hint(monkeypatch):

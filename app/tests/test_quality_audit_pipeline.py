@@ -24,7 +24,7 @@ def test_quality_audit_pipeline_mode(tmp_path):
                     "subject": "pharmacology",
                     "mode": "practical",
                     "question": "Сколько амоксициллина дать собаке 12 кг при пиодермии?",
-                    "must_include": ["уточните форму и концентрацию"],
+                    "must_include": ["уточнение формы и концентрации"],
                     "must_not_include": [],
                     "requires_escalation": False,
                     "requires_clarification": True,

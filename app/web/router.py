@@ -1,11 +1,9 @@
 from datetime import UTC, datetime
 import json
-import os
 from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
-from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy import String as SQLString
 from sqlalchemy import cast
@@ -18,52 +16,22 @@ from app.db.repositories import ErrorEventRepo, FeedbackEventRepo, ModelCallRepo
 from app.learning.service import LearningService
 from app.db.session import get_db
 from app.quotas import QuotaGuard
+from app.web.document_cleanup import cleanup_document_files, document_storage_paths
+from app.web.schemas import (
+    FlashcardReviewRequest,
+    LoginRequest,
+    OnboardingRequest,
+    SearchResponse,
+    UpdateNoteRequest,
+    UserProfileUpdateRequest,
+    WebSettingsUpdateRequest,
+)
 from app.web.security import InMemoryRateLimiter, RedisBackedRateLimiter, issue_session_token, validate_session_token, verify_password
 
 router = APIRouter(prefix="/api/web", tags=["web"])
 _fallback_rate_limiter = InMemoryRateLimiter()
 _rate_limiter = RedisBackedRateLimiter(redis_url=get_settings().redis_url, fallback=_fallback_rate_limiter)
 SESSION_COOKIE = "vetstudy_session"
-
-
-class LoginRequest(BaseModel):
-    password: str
-
-
-class UpdateNoteRequest(BaseModel):
-    title: str | None = None
-    content: str
-    tags: list[str] | None = None
-
-
-class WebSettingsUpdateRequest(BaseModel):
-    language: str | None = None
-    role: str | None = None
-
-
-class UserProfileUpdateRequest(BaseModel):
-    region: str
-    species_focus: str
-
-
-class OnboardingRequest(BaseModel):
-    language: str
-    specialization: str
-    subjects: list[str]
-
-
-class SearchResponse(BaseModel):
-    id: UUID
-    title: str | None
-    content: str
-    kind: str
-    tags: list[str]
-    topic_id: UUID | None
-    created_at: datetime
-
-
-class FlashcardReviewRequest(BaseModel):
-    action: str
 
 
 def _check_token(request: Request, authorization: str | None = Header(default=None)) -> str:
@@ -204,37 +172,6 @@ def _allow_admin_rate_limit(user: User) -> bool:
         limit=settings.web_admin_rate_limit_count,
         window_seconds=settings.web_admin_rate_limit_window_seconds,
     )
-
-
-def _document_storage_paths(documents: list[Document]) -> list[str]:
-    candidate_keys = ("path", "stored_path", "file_path", "upload_path")
-    out: list[str] = []
-    for doc in documents:
-        metadata = dict(doc.metadata_ or {})
-        for key in candidate_keys:
-            value = metadata.get(key)
-            if isinstance(value, str) and value.strip():
-                out.append(value.strip())
-                break
-    return out
-
-
-def _cleanup_document_files(paths: list[str]) -> None:
-    settings = get_settings()
-    base = Path(settings.media_storage_path).resolve()
-    seen: set[Path] = set()
-    for raw_path in paths:
-        file_path = Path(raw_path)
-        resolved = file_path.resolve() if file_path.is_absolute() else (base / file_path).resolve()
-        if base not in resolved.parents:
-            continue
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        try:
-            os.remove(resolved)
-        except FileNotFoundError:
-            continue
 
 
 @router.post("/auth/session")
@@ -553,7 +490,7 @@ def delete_topic(topic_id: UUID, user: User = Depends(_get_current_user), db: Se
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
     documents = db.execute(select(Document).where(Document.user_id == user.id, Document.topic_id == topic_id)).scalars().all()
-    document_paths = _document_storage_paths(documents)
+    document_paths = document_storage_paths(documents)
     session_ids = [x.id for x in db.execute(select(ChatSession).where(ChatSession.user_id == user.id, ChatSession.topic_id == topic_id)).scalars().all()]
     if session_ids:
         db.execute(Message.__table__.delete().where(Message.session_id.in_(session_ids)))
@@ -565,7 +502,7 @@ def delete_topic(topic_id: UUID, user: User = Depends(_get_current_user), db: Se
     if topic.user_id == user.id:
         db.delete(topic)
     db.commit()
-    _cleanup_document_files(document_paths)
+    cleanup_document_files(document_paths)
     return {"ok": True}
 
 
@@ -574,7 +511,7 @@ def delete_account(user: User = Depends(_get_current_user), db: Session = Depend
     if user.role == "owner":
         raise HTTPException(status_code=400, detail="Owner account cannot be deleted via API")
     documents = db.execute(select(Document).where(Document.user_id == user.id)).scalars().all()
-    document_paths = _document_storage_paths(documents)
+    document_paths = document_storage_paths(documents)
     topic_ids = [x.id for x in db.execute(select(Topic).where(Topic.user_id == user.id)).scalars().all()]
     session_ids = [x.id for x in db.execute(select(ChatSession).where(ChatSession.user_id == user.id)).scalars().all()]
     if session_ids:
@@ -589,7 +526,7 @@ def delete_account(user: User = Depends(_get_current_user), db: Session = Depend
     db.execute(ModelCall.__table__.delete().where(ModelCall.user_id == user.id))
     db.delete(user)
     db.commit()
-    _cleanup_document_files(document_paths)
+    cleanup_document_files(document_paths)
     return {"ok": True}
 
 
@@ -674,36 +611,72 @@ def admin_unanswered_alerts(
     if not _allow_admin_rate_limit(user):
         raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
-    cutoff = datetime.now(UTC)
-    sessions = db.execute(select(ChatSession)).scalars().all()
+    now_ts = datetime.now(UTC)
+    last_user_cte = (
+        select(
+            Message.session_id.label("session_id"),
+            func.max(Message.created_at).label("last_user_created_at"),
+        )
+        .where(Message.role == "user")
+        .group_by(Message.session_id)
+        .cte("last_user")
+    )
+    last_assistant_cte = (
+        select(
+            Message.session_id.label("session_id"),
+            func.max(Message.created_at).label("last_assistant_created_at"),
+        )
+        .where(Message.role == "assistant")
+        .group_by(Message.session_id)
+        .cte("last_assistant")
+    )
+    last_user_message_cte = (
+        select(
+            Message.session_id.label("session_id"),
+            Message.id.label("message_id"),
+            Message.content.label("content"),
+            Message.created_at.label("created_at"),
+        )
+        .join(
+            last_user_cte,
+            (Message.session_id == last_user_cte.c.session_id)
+            & (Message.created_at == last_user_cte.c.last_user_created_at),
+        )
+        .where(Message.role == "user")
+        .cte("last_user_message")
+    )
+
+    rows = db.execute(
+        select(
+            ChatSession.id,
+            ChatSession.user_id,
+            last_user_message_cte.c.message_id,
+            last_user_message_cte.c.content,
+            last_user_message_cte.c.created_at,
+            last_assistant_cte.c.last_assistant_created_at,
+        )
+        .join(last_user_message_cte, last_user_message_cte.c.session_id == ChatSession.id)
+        .outerjoin(last_assistant_cte, last_assistant_cte.c.session_id == ChatSession.id)
+        .where(
+            or_(
+                last_assistant_cte.c.last_assistant_created_at.is_(None),
+                last_assistant_cte.c.last_assistant_created_at < last_user_message_cte.c.created_at,
+            )
+        )
+    ).all()
+
     alerts: list[dict] = []
-    for session in sessions:
-        last_user = db.execute(
-            select(Message)
-            .where(Message.session_id == session.id, Message.role == "user")
-            .order_by(Message.created_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        if not last_user:
-            continue
-        last_assistant = db.execute(
-            select(Message)
-            .where(Message.session_id == session.id, Message.role == "assistant")
-            .order_by(Message.created_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        if last_assistant and last_assistant.created_at >= last_user.created_at:
-            continue
-        age_minutes = int((cutoff - last_user.created_at).total_seconds() / 60)
+    for session_id, user_id, message_id, content, created_at, _ in rows:
+        age_minutes = int((now_ts - created_at).total_seconds() / 60)
         if age_minutes < older_than_minutes:
             continue
         alerts.append(
             {
-                "session_id": session.id,
-                "user_id": session.user_id,
-                "last_user_message_id": last_user.id,
+                "session_id": session_id,
+                "user_id": user_id,
+                "last_user_message_id": message_id,
                 "age_minutes": age_minutes,
-                "preview": last_user.content[:240],
+                "preview": (content or "")[:240],
             }
         )
     return alerts
@@ -736,6 +709,7 @@ def admin_analytics_summary(
         "dau_like": service.dau_like(days=min(max(days, 1), 60)),
         "content_gap_report": service.content_gap_report(days=days),
         "retrieval_quality": service.retrieval_quality(days=days),
+        "learning_adherence": service.learning_adherence(days=days),
         "behavior": service.behavior_summary(days=days),
     }
 
@@ -861,6 +835,48 @@ def admin_evidence_needs_check(
                     "preview": row.content[:280],
                 }
             )
+    return out
+
+
+@router.get("/admin/trust-safety-trace")
+def admin_trust_safety_trace(
+    limit: int = 30,
+    _: str = Depends(_check_token),
+    user: User = Depends(_get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
+    _require_admin(user)
+    rows = db.execute(
+        select(Message)
+        .where(Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .limit(min(limit, 200))
+    ).scalars().all()
+    out: list[dict] = []
+    for row in rows:
+        meta = row.metadata_ or {}
+        if not bool(meta.get("high_risk")):
+            continue
+        safety = dict(meta.get("safety") or {})
+        evidence = dict(meta.get("evidence") or {})
+        why_trace = dict(meta.get("why_trace") or {})
+        out.append(
+            {
+                "message_id": row.id,
+                "session_id": row.session_id,
+                "created_at": row.created_at,
+                "risk_intent": safety.get("intent"),
+                "risk_tags": list(safety.get("risk_tags") or []),
+                "verification_status": evidence.get("verification_status") or evidence.get("status"),
+                "trust_indicators": list(evidence.get("trust_indicators") or []),
+                "needs_manual_check": bool(evidence.get("needs_manual_check")),
+                "manual_check_reasons": list(why_trace.get("manual_check_reasons") or evidence.get("manual_check_reasons") or []),
+                "missing_data": list(why_trace.get("missing_data") or evidence.get("next_questions") or []),
+                "preview": row.content[:280],
+            }
+        )
     return out
 
 

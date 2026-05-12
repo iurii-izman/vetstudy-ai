@@ -49,7 +49,26 @@ def make_client():
     sess3 = Session(mode='practical', user_id=user1.id, topic_id=topic3.id, is_active=False)
     db.add_all([sess1, sess2, sess3])
     db.flush()
-    msg1 = Message(role='assistant', content='U1 answer', session_id=sess1.id)
+    msg1 = Message(
+        role='assistant',
+        content='U1 answer',
+        session_id=sess1.id,
+        metadata_={
+            "high_risk": True,
+            "safety": {"intent": "dosage_request", "risk_tags": ["dosage_request"]},
+            "evidence": {
+                "status": "needs_manual_check",
+                "verification_status": "needs_manual_check",
+                "trust_indicators": ["src:official | trust:high | verify:needs_manual_check"],
+                "needs_manual_check": True,
+                "manual_check_reasons": ["Need exact product concentration."],
+                "next_questions": ["Species and weight?"],
+            },
+            "why_trace": {
+                "missing_data": ["Species and weight?"],
+            },
+        },
+    )
     msg2 = Message(role='assistant', content='U2 answer', session_id=sess2.id)
     db.add_all([msg1, msg2])
     db.flush()
@@ -254,6 +273,10 @@ def test_admin_evidence_endpoints():
 
     needs = client.get('/api/web/admin/evidence/needs-check', headers=_owner_headers())
     assert needs.status_code == 200
+    trace = client.get('/api/web/admin/trust-safety-trace', headers=_owner_headers())
+    assert trace.status_code == 200
+    assert trace.json()
+    assert trace.json()[0]["risk_intent"] == "dosage_request"
 
 
 def test_search_facets_and_topic_graph():
@@ -380,6 +403,33 @@ def test_privacy_account_delete_is_idempotent_when_file_missing(tmp_path):
                 db.close()
             deleted = c.delete("/api/web/privacy/account", headers=_user_headers(1002))
             assert deleted.status_code == 200
+    finally:
+        settings.media_storage_path = old_media_storage
+
+
+def test_privacy_topic_delete_does_not_remove_outside_storage(tmp_path):
+    client, topic1_id, _ = make_client()
+    settings = get_settings()
+    upload_base = tmp_path / "uploads"
+    upload_base.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.pdf"
+    outside.write_text("outside", encoding="utf-8")
+    old_media_storage = settings.media_storage_path
+    settings.media_storage_path = str(upload_base)
+    try:
+        with client as c:
+            db = next(app.dependency_overrides[get_db]())
+            try:
+                user = db.query(User).filter(User.telegram_user_id == 1001).one()
+                topic = db.query(Topic).filter(Topic.id == topic1_id).one()
+                doc = Document(user_id=user.id, topic_id=topic.id, filename="outside.pdf", size_bytes=7, status="indexed", job_id="job-topic-outside", metadata_={"stored_path": str(outside)})
+                db.add(doc)
+                db.commit()
+            finally:
+                db.close()
+            deleted = c.delete(f"/api/web/privacy/topic/{topic1_id}", headers=_user_headers(1001))
+            assert deleted.status_code == 200
+        assert outside.exists()
     finally:
         settings.media_storage_path = old_media_storage
 

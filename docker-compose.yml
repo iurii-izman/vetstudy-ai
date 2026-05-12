@@ -65,7 +65,11 @@ services:
     command: sh -c "python -m app.media.worker"
     restart: unless-stopped
     healthcheck:
-      disable: true
+      test: ["CMD-SHELL", "python -m app.media.worker --diagnose --fail-on-stall"]
+      interval: 45s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   db:
     image: pgvector/pgvector:pg16
