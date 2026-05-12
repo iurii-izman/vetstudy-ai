@@ -458,7 +458,19 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 safety_warning=safety.warning,
             )
             prompt += "\n\nEVIDENCE_POLICY:\n- Используй только факты, подтверждённые блоком RETRIEVED_MEMORY.\n- Не делай уверенных утверждений, если в памяти нет подтверждения.\n- Для каждого клинического тезиса добавляй ссылку вида [doc/chunk]."
-            answer = await llm_router.generate(db, user.id, prompt, purpose="answer")
+            answer = await llm_router.generate(
+                db,
+                user.id,
+                prompt,
+                purpose="answer",
+                metadata={
+                    **(metadata or {}),
+                    "safety": {
+                        "intent": getattr(safety, "intent", None),
+                        "risk_tags": list(getattr(safety, "risk_tags", []) or []),
+                    },
+                },
+            )
             rendered_answer = answer
             evidence_payload = None
             if effective_mode == "evidence":

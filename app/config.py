@@ -49,10 +49,10 @@ class Settings(BaseSettings):
     llm_retry_attempts: int = 2
     llm_retry_backoff_s: float = 0.5
     llm_max_request_tokens: int = 4096
-    llm_low_risk_provider: str = ""
-    llm_low_risk_model: str = ""
-    llm_high_risk_provider: str = ""
-    llm_high_risk_model: str = ""
+    llm_low_risk_provider: str = "gemini"
+    llm_low_risk_model: str = "gemini-2.5-flash-lite"
+    llm_high_risk_provider: str = "openai"
+    llm_high_risk_model: str = "gpt-5.4"
     llm_cost_estimate_input_per_1k: float = 0.0005
     llm_cost_estimate_output_per_1k: float = 0.0015
 

@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import func, select
 
 from app.ai.providers.base import LLMAuthError, LLMProviderError, LLMRateLimitError, LLMResponse, LLMTransientError
+from app.ai.safety import SafetyGate
 from app.ai.validators import PostGenerationValidator
 from app.config import Settings
 from app.db.models import ModelCall
@@ -56,6 +57,15 @@ class CostGuard:
 
 
 class LLMRouter:
+    HIGH_RISK_INTENTS = {
+        "dosage_request",
+        "toxicology",
+        "emergency_or_red_flag",
+        "drug_interaction",
+        "clinical_case",
+        "uncertain_source",
+    }
+
     def __init__(
         self,
         *,
@@ -90,14 +100,25 @@ class LLMRouter:
         purpose: str = "answer",
     ) -> str:
         payload_messages = messages or [{"role": "user", "content": prompt or ""}]
-        selected_primary, selected_fallback, model = self._providers_for_purpose(purpose, payload_messages, metadata or {})
+        providers_chain, route_decision, route_reason = self._providers_for_purpose(purpose, payload_messages, metadata or {})
         self.cost_guard.check_budget(db)
         self.cost_guard.check_request_tokens(payload_messages, self.settings.llm_max_request_tokens)
         last_error: Exception | None = None
-        for provider in (selected_primary, selected_fallback):
+        for idx, provider in enumerate(providers_chain):
             if provider is None:
                 continue
             t0 = time.perf_counter()
+            model = self._provider_model(provider)
+            fallback_used = idx > 0
+            self._log_route_decision(
+                route_decision=route_decision,
+                reason=route_reason,
+                provider=provider.name,
+                model=model,
+                fallback_used=fallback_used,
+                purpose=purpose,
+                user_id=user_id,
+            )
             try:
                 limiter = self._provider_locks.setdefault(provider.name, asyncio.Semaphore(4))
                 async with limiter:
@@ -107,7 +128,7 @@ class LLMRouter:
                         system_prompt=system_prompt,
                         response_format=response_format,
                         tools=tools,
-                        metadata={**(metadata or {}), "purpose": purpose, "model": model},
+                        metadata={**(metadata or {}), "purpose": purpose, "model": model, "route_decision": route_decision, "route_reason": route_reason},
                     )
                 latency_ms = int((time.perf_counter() - t0) * 1000)
                 validated = self.validator.validate(question=payload_messages[-1].get("content", ""), answer=response.text)
@@ -203,26 +224,76 @@ class LLMRouter:
 
     def _providers_for_purpose(self, purpose: str, messages: list[dict[str, str]], metadata: dict[str, Any]):
         if purpose == "answer":
-            text = " ".join(m.get("content", "") for m in messages).lower()
-            high_risk = any(
-                token in text
-                for token in ("доз", "mg/kg", "мг/кг", "парацетамол", "отрав", "не дыш", "без сознания", "взаимодейств", "клиническ")
-            )
-            if high_risk and self.settings.llm_high_risk_provider and self.settings.llm_high_risk_model:
-                from app.services import _build_provider
-
-                p = _build_provider(self.settings.llm_high_risk_provider, self.settings.llm_high_risk_model, self.settings)
-                return p, self.fallback, self.settings.llm_high_risk_model
-            if (not high_risk) and self.settings.llm_low_risk_provider and self.settings.llm_low_risk_model:
-                from app.services import _build_provider
-
-                p = _build_provider(self.settings.llm_low_risk_provider, self.settings.llm_low_risk_model, self.settings)
-                return p, self.fallback, self.settings.llm_low_risk_model
+            high_risk, reason = self._is_high_risk_answer(messages, metadata)
+            if high_risk:
+                return self._build_high_risk_chain(), "high_risk", reason
+            return self._build_low_risk_chain(), "low_risk", reason
         if purpose == "classification":
-            return self.classification, self.fallback, self.settings.llm_classification_model
+            return [self.classification, self.fallback], "n/a", "purpose=classification"
         if purpose == "summary":
-            return self.summary, self.fallback, self.settings.llm_summary_model
-        return self.primary, self.fallback, self.settings.llm_primary_model
+            return [self.summary, self.fallback], "n/a", "purpose=summary"
+        return [self.primary, self.fallback], "n/a", f"purpose={purpose}"
+
+    def _is_high_risk_answer(self, messages: list[dict[str, str]], metadata: dict[str, Any]) -> tuple[bool, str]:
+        safety = (metadata or {}).get("safety") or {}
+        intent = str(safety.get("intent") or metadata.get("intent") or "").strip()
+        risk_tags = safety.get("risk_tags")
+        if risk_tags is None:
+            risk_tags = metadata.get("risk_tags")
+        tags = [str(x).strip() for x in (risk_tags or []) if str(x).strip()]
+        if intent in self.HIGH_RISK_INTENTS:
+            return True, f"intent={intent}"
+        if tags:
+            return True, f"risk_tags={','.join(tags)}"
+
+        text = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
+        gate_result = SafetyGate().check(text)
+        if gate_result.intent in self.HIGH_RISK_INTENTS:
+            return True, f"intent={gate_result.intent}"
+        if gate_result.risk_tags:
+            return True, f"risk_tags={','.join(gate_result.risk_tags)}"
+        return False, f"intent={gate_result.intent}"
+
+    def _build_high_risk_chain(self) -> list[Any]:
+        chain: list[Any] = []
+        from app.services import _build_provider
+
+        if self.settings.llm_high_risk_provider and self.settings.llm_high_risk_model:
+            chain.append(_build_provider(self.settings.llm_high_risk_provider, self.settings.llm_high_risk_model, self.settings))
+        if self.settings.gemini_api_key:
+            chain.append(_build_provider("gemini", "gemini-2.5-pro", self.settings))
+        chain.append(self.fallback)
+        return self._dedupe_chain(chain)
+
+    def _build_low_risk_chain(self) -> list[Any]:
+        chain: list[Any] = []
+        from app.services import _build_provider
+
+        if self.settings.llm_low_risk_provider and self.settings.llm_low_risk_model:
+            chain.append(_build_provider(self.settings.llm_low_risk_provider, self.settings.llm_low_risk_model, self.settings))
+        if self.settings.gemini_api_key:
+            chain.append(_build_provider("gemini", "gemini-2.5-flash", self.settings))
+        chain.append(self.fallback)
+        return self._dedupe_chain(chain)
+
+    @staticmethod
+    def _provider_model(provider: Any) -> str:
+        return str(getattr(provider, "model", "") or "unknown-model")
+
+    def _dedupe_chain(self, chain: list[Any]) -> list[Any]:
+        unique: list[Any] = []
+        seen: set[tuple[str, str]] = set()
+        for provider in chain:
+            if provider is None:
+                continue
+            key = (str(getattr(provider, "name", "")), self._provider_model(provider))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(provider)
+        if unique:
+            return unique
+        return [self.primary, self.fallback]
 
     def _model_for_purpose(self, purpose: str) -> str:
         if purpose == "classification":
@@ -284,5 +355,30 @@ class LLMRouter:
                 "error": error,
                 "error_category": category,
                 "telegram_user_id": safe_user_id(user_id, salt),
+            },
+        )
+
+    def _log_route_decision(
+        self,
+        *,
+        route_decision: str,
+        reason: str,
+        provider: str,
+        model: str,
+        fallback_used: bool,
+        purpose: str,
+        user_id,
+    ) -> None:
+        logger.info(
+            "route_decision",
+            extra={
+                "event": "route_decision",
+                "route_decision": route_decision,
+                "reason": reason,
+                "provider": provider,
+                "model": model,
+                "fallback_used": fallback_used,
+                "purpose": purpose,
+                "telegram_user_id": safe_user_id(user_id, self.settings.user_id_hash_salt),
             },
         )

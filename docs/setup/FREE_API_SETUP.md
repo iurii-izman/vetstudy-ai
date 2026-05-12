@@ -32,12 +32,24 @@ WEB_SESSION_SECRET=<ДЛИННЫЙ_RANDOM_SECRET_ДЛЯ_SESSION>
 
 OPENROUTER_API_KEY=
 GROQ_API_KEY=
+OPENAI_API_KEY=
+GEMINI_API_KEY=
+
+LLM_HIGH_RISK_PROVIDER=openai
+LLM_HIGH_RISK_MODEL=gpt-5.4
+LLM_LOW_RISK_PROVIDER=gemini
+LLM_LOW_RISK_MODEL=gemini-2.5-flash-lite
 ```
 
 Остальное уже преднастроено в `.env.example` под бесплатный beta-режим:
 - primary = Groq (`llama-3.1-8b-instant`) как быстрый provider
 - fallback = OpenRouter free model (`openai/gpt-oss-20b:free`)
 - cost limits снижены для безопасного теста
+
+Dual-routing поведение:
+- high-risk intent/risk_tags идёт в paid high-risk модель (`openai/gpt-5.4` по умолчанию);
+- low-risk/general идёт в free low-risk модель (`gemini/gemini-2.5-flash-lite` по умолчанию);
+- fallback раздельный: для high-risk сначала `gemini-2.5-pro` (если доступен Gemini key), для low-risk сначала `gemini-2.5-flash`, затем стандартный fallback.
 
 ## 3) Готовые адреса/эндпоинты
 

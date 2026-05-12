@@ -51,6 +51,11 @@ curl http://localhost:8000/ready
 
 For provider setup, use `docs/setup/FREE_API_SETUP.md`.
 
+Dual risk routing (beta default):
+- high-risk intents/tags (`dosage_request`, `toxicology`, `emergency_or_red_flag`, `drug_interaction`, `clinical_case`, `uncertain_source`) route to `LLM_HIGH_RISK_PROVIDER/LLM_HIGH_RISK_MODEL` (default `openai/gpt-5.4`);
+- low-risk study queries route to `LLM_LOW_RISK_PROVIDER/LLM_LOW_RISK_MODEL` (default `gemini/gemini-2.5-flash-lite`);
+- fallbacks are per-route: high-risk tries `gemini-2.5-pro` (if Gemini is configured), low-risk tries `gemini-2.5-flash` (if configured), then normal `LLM_FALLBACK_PROVIDER/MODEL`.
+
 ## Local Development
 
 Backend:
