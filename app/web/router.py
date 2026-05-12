@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 from uuid import UUID
@@ -499,6 +499,74 @@ def admin_provider_metrics(_: str = Depends(_check_token), user: User = Depends(
     ]
 
 
+@router.get("/admin/alerts/cost-budget")
+def admin_cost_budget_alert(
+    _: str = Depends(_check_token),
+    user: User = Depends(_get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
+    _require_admin(user)
+    settings = get_settings()
+    now_ts = datetime.now(UTC)
+    week_start = now_ts - timedelta(days=7)
+    prev_week_start = week_start - timedelta(days=7)
+
+    current_week_cost = float(
+        db.execute(select(func.coalesce(func.sum(ModelCall.cost_usd), 0)).where(ModelCall.created_at >= week_start)).scalar_one()
+    )
+    previous_week_cost = float(
+        db.execute(
+            select(func.coalesce(func.sum(ModelCall.cost_usd), 0)).where(
+                ModelCall.created_at >= prev_week_start,
+                ModelCall.created_at < week_start,
+            )
+        ).scalar_one()
+    )
+    weekly_budget = float(settings.weekly_cost_budget_usd) if float(settings.weekly_cost_budget_usd) > 0 else float(settings.monthly_cost_limit_usd) / 4.0
+    weekly_budget = max(0.01, weekly_budget)
+    warning_ratio = min(0.99, max(0.1, float(settings.weekly_cost_alarm_ratio)))
+    warning_threshold = weekly_budget * warning_ratio
+
+    alert_level = "ok"
+    if current_week_cost >= weekly_budget:
+        alert_level = "critical"
+    elif current_week_cost >= warning_threshold:
+        alert_level = "warning"
+
+    delta = current_week_cost - previous_week_cost
+    delta_ratio = (delta / previous_week_cost) if previous_week_cost > 0 else None
+    top_rows = db.execute(
+        select(
+            ModelCall.provider,
+            ModelCall.model,
+            func.coalesce(func.sum(ModelCall.cost_usd), 0),
+        )
+        .where(ModelCall.created_at >= week_start)
+        .group_by(ModelCall.provider, ModelCall.model)
+        .order_by(func.coalesce(func.sum(ModelCall.cost_usd), 0).desc())
+        .limit(5)
+    ).all()
+    top_models = [{"provider": provider, "model": model, "cost_usd": float(cost)} for provider, model, cost in top_rows]
+
+    return {
+        "window_days": 7,
+        "window_start": week_start.isoformat(),
+        "window_end": now_ts.isoformat(),
+        "cost_usd_current_week": current_week_cost,
+        "cost_usd_previous_week": previous_week_cost,
+        "delta_usd_vs_previous_week": delta,
+        "delta_ratio_vs_previous_week": delta_ratio,
+        "weekly_budget_usd": weekly_budget,
+        "warning_threshold_usd": warning_threshold,
+        "utilization_ratio": current_week_cost / weekly_budget,
+        "remaining_usd": max(0.0, weekly_budget - current_week_cost),
+        "alert_level": alert_level,
+        "top_models": top_models,
+    }
+
+
 @router.get("/admin/alerts/unanswered")
 def admin_unanswered_alerts(
     older_than_minutes: int = 20,
@@ -608,8 +676,23 @@ def admin_analytics_summary(
         "content_gap_report": service.content_gap_report(days=days),
         "retrieval_quality": service.retrieval_quality(days=days),
         "learning_adherence": service.learning_adherence(days=days),
+        "journey_health": service.journey_health(days=days),
+        "learning_outcomes": service.learning_outcomes(days=days),
         "behavior": service.behavior_summary(days=days),
     }
+
+
+@router.get("/admin/analytics/journey-health")
+def admin_journey_health(
+    days: int = 30,
+    _: str = Depends(_check_token),
+    user: User = Depends(_get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
+    _require_admin(user)
+    return ProductAnalyticsService(db).journey_health(days=days)
 
 
 @router.get("/admin/analytics/retrieval-quality")
@@ -672,6 +755,12 @@ def admin_model_settings(_: str = Depends(_check_token), user: User = Depends(_g
         "fallback_provider": settings.llm_fallback_provider,
         "fallback_model": settings.llm_fallback_model,
         "max_request_tokens": settings.llm_max_request_tokens,
+        "max_output_tokens_default": settings.llm_max_output_tokens_default,
+        "max_output_tokens_low_risk": settings.llm_max_output_tokens_low_risk,
+        "max_output_tokens_high_risk": settings.llm_max_output_tokens_high_risk,
+        "max_output_tokens_dosage": settings.llm_max_output_tokens_dosage,
+        "max_output_tokens_toxicology": settings.llm_max_output_tokens_toxicology,
+        "max_output_tokens_emergency": settings.llm_max_output_tokens_emergency,
     }
 
 

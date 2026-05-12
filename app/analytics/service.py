@@ -257,3 +257,87 @@ class ProductAnalyticsService:
             "voice_to_summary": {"offered": voice_summary_offered, "generated": voice_summary_generated},
             "return_after_dropout": {"nudges": return_after_dropout, "relaunches": int(by_event.get("learning_relaunched", 0))},
         }
+
+    def journey_health(self, *, days: int = 30) -> dict[str, Any]:
+        since = datetime.now(UTC) - timedelta(days=days)
+        rows = self.db.execute(
+            select(ProductEvent.user_id, ProductEvent.event_name, ProductEvent.properties).where(ProductEvent.created_at >= since)
+        ).all()
+        drop_points: Counter[str] = Counter()
+        dropped_users: set[Any] = set()
+        recovered_users: set[Any] = set()
+        first_week_users: set[Any] = set()
+        first_week_completed: set[Any] = set()
+        first_value_users: set[Any] = set()
+        for user_id, event_name, props in rows:
+            payload = props or {}
+            if event_name == "activation_start":
+                first_week_users.add(user_id)
+            if event_name == "journey_drop_detected":
+                reason = str(payload.get("reason", "unknown"))
+                drop_points[reason] += 1
+                dropped_users.add(user_id)
+            if event_name in {"journey_recovered", "learning_relaunched"}:
+                recovered_users.add(user_id)
+            if event_name == "journey_state_changed" and str(payload.get("to")) == "habit":
+                first_week_completed.add(user_id)
+            if event_name == "learning_route_opened":
+                first_value_users.add(user_id)
+        recovery_rate = (len(recovered_users & dropped_users) / len(dropped_users)) if dropped_users else 0.0
+        completion_rate = (len(first_week_completed) / len(first_week_users)) if first_week_users else 0.0
+        first_value_rate = (len(first_value_users) / len(first_week_users)) if first_week_users else 0.0
+        return {
+            "drop_points": dict(drop_points),
+            "dropped_users": len(dropped_users),
+            "recovered_users": len(recovered_users & dropped_users),
+            "recovery_rate": recovery_rate,
+            "first_week_users": len(first_week_users),
+            "first_week_completed": len(first_week_completed),
+            "first_week_completion_rate": completion_rate,
+            "first_value_10m_rate": first_value_rate,
+        }
+
+    def learning_outcomes(self, *, days: int = 30) -> dict[str, Any]:
+        since = datetime.now(UTC) - timedelta(days=days)
+        review_rows = self.db.execute(
+            select(ReviewEvent.score, ReviewEvent.created_at).where(ReviewEvent.created_at >= since).order_by(ReviewEvent.created_at.asc())
+        ).all()
+        scores = [int(score or 0) for score, _ in review_rows]
+        if scores:
+            head = scores[: max(1, len(scores) // 2)]
+            tail = scores[len(head) :]
+            learning_gain_proxy = (sum(tail) / max(1, len(tail))) - (sum(head) / max(1, len(head)))
+        else:
+            learning_gain_proxy = 0.0
+
+        route_rows = self.db.execute(
+            select(ProductEvent.properties).where(
+                ProductEvent.event_name == "learning_route_opened",
+                ProductEvent.created_at >= since,
+            )
+        ).all()
+        fit_hits = 0
+        fit_total = 0
+        for row in route_rows:
+            payload = row[0] or {}
+            band = str(payload.get("difficulty_band", "medium"))
+            due_count = int(payload.get("due_count", 0) or 0)
+            reviewed = int(payload.get("reviewed_today", 0) or 0)
+            fit_total += 1
+            if (band == "easy" and due_count >= 3) or (band == "medium" and due_count in {1, 2, 3, 4}) or (band == "hard" and reviewed >= 1):
+                fit_hits += 1
+        difficulty_fit = (fit_hits / fit_total) if fit_total else 0.0
+
+        adherence = self.learning_adherence(days=days)
+        journey = self.journey_health(days=days)
+        weak_drop_signals = int(journey.get("dropped_users", 0))
+        skip_signals = int(adherence.get("learning_skipped_signals", 0))
+        open_routes = int(adherence.get("learning_route_opened", 0))
+        dropout_risk_score = min(1.0, round((skip_signals * 0.45 + weak_drop_signals * 0.7) / max(1, open_routes), 4))
+        return {
+            "learning_gain_proxy": round(float(learning_gain_proxy), 4),
+            "difficulty_fit": round(float(difficulty_fit), 4),
+            "dropout_risk_score": dropout_risk_score,
+            "review_samples": len(scores),
+            "route_samples": fit_total,
+        }

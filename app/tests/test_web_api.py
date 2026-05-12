@@ -335,6 +335,28 @@ def test_web_login_rate_limit_and_admin_alert_endpoints():
     assert isinstance(metrics.json(), list)
     alerts = client.get("/api/web/admin/alerts/unanswered", headers=_owner_headers())
     assert alerts.status_code == 200
+    cost_alert = client.get("/api/web/admin/alerts/cost-budget", headers=_owner_headers())
+    assert cost_alert.status_code == 200
+    assert "alert_level" in cost_alert.json()
+
+
+def test_admin_cost_budget_alert_can_be_critical():
+    client, _, _ = make_client()
+    settings = get_settings()
+    old_budget = settings.weekly_cost_budget_usd
+    old_ratio = settings.weekly_cost_alarm_ratio
+    try:
+        settings.weekly_cost_budget_usd = 0.05
+        settings.weekly_cost_alarm_ratio = 0.8
+        alert = client.get("/api/web/admin/alerts/cost-budget", headers=_owner_headers())
+        assert alert.status_code == 200
+        body = alert.json()
+        assert body["alert_level"] == "critical"
+        assert body["cost_usd_current_week"] >= 0.1
+        assert body["weekly_budget_usd"] == 0.05
+    finally:
+        settings.weekly_cost_budget_usd = old_budget
+        settings.weekly_cost_alarm_ratio = old_ratio
 
 
 def test_profile_endpoints_and_admin_analytics_summary():
@@ -350,8 +372,12 @@ def test_profile_endpoints_and_admin_analytics_summary():
     summary = client.get("/api/web/admin/analytics/summary", headers=_owner_headers())
     assert summary.status_code == 200
     assert "activation_funnel" in summary.json()
+    assert "journey_health" in summary.json()
     assert "content_gap_report" in summary.json()
     assert "retrieval_quality" in summary.json()
+    journey = client.get("/api/web/admin/analytics/journey-health", headers=_owner_headers())
+    assert journey.status_code == 200
+    assert "drop_points" in journey.json()
     retrieval = client.get("/api/web/admin/analytics/retrieval-quality", headers=_owner_headers())
     assert retrieval.status_code == 200
     assert "retrieval_hit_rate" in retrieval.json()

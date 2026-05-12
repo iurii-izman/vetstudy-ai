@@ -242,6 +242,8 @@ async def test_allowlist_accepts_username(monkeypatch):
     await handlers.cmd_start(message)
     assert message.answers
     assert "VetStudy AI готов" in message.answers[0]["text"]
+    assert "First value за 10 минут" in message.answers[0]["text"]
+    assert "One-tap сценарий" in message.answers[1]["text"]
 
 
 @pytest.mark.asyncio
@@ -368,6 +370,11 @@ async def test_today_command_builds_route_and_tracks_event(monkeypatch):
             zero_result_searches=1,
             negative_feedback_count=1,
             high_risk_block_count=4,
+            skill_map={"therapy": {"confidence": 0.5, "errors": 1, "recent_case_level": "basic", "updated_from": "review/case/feedback/search"}},
+            difficulty_band="medium",
+            progression_mode="controlled_progression",
+            recovery_mode=False,
+            why_personalization="why",
         ),
     )
     monkeypatch.setattr(handlers.LearningService, "compute_streak", lambda self, **kwargs: (3, 0))
@@ -434,6 +441,9 @@ async def test_plan_week_command_outputs_plan(monkeypatch):
             overdue_count=3,
             streak_days=4,
             relaunch_days=0,
+            workload_budget=12,
+            total_density=10,
+            why_plan="why",
         ),
     )
     monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)))

@@ -63,7 +63,7 @@ Web dashboard address:
 For provider setup, use `docs/setup/FREE_API_SETUP.md`.
 
 Dual risk routing (beta default):
-- high-risk intents/tags (`dosage_request`, `toxicology`, `emergency_or_red_flag`, `drug_interaction`, `clinical_case`, `uncertain_source`) route to `LLM_HIGH_RISK_PROVIDER/LLM_HIGH_RISK_MODEL` (default `openai/gpt-5.4`);
+- high-risk intents/tags (`dosage_request`, `toxicology`, `emergency_or_red_flag`, `drug_interaction`, `clinical_case`, `uncertain_source`) route to `LLM_HIGH_RISK_PROVIDER/LLM_HIGH_RISK_MODEL` (default `openai/gpt-5.4-mini`);
 - low-risk study queries route to `LLM_LOW_RISK_PROVIDER/LLM_LOW_RISK_MODEL` (default `gemini/gemini-2.5-flash-lite`);
 - fallbacks are per-route: high-risk tries `gemini-2.5-pro` (if Gemini is configured), low-risk tries `gemini-2.5-flash` (if configured), then normal `LLM_FALLBACK_PROVIDER/MODEL`.
 
@@ -154,6 +154,7 @@ python scripts/preflight_check.py --db --schema --provider
 python scripts/quality_audit.py --limit 10 --delay-s 0 --fail-on-regression --min-overall-quality 62 --max-generic-rate 0.35 --min-clarification-hit-rate 0.8
 python scripts/project_scorecard.py --database-url "$DATABASE_URL"
 python scripts/restore_verify.py --database-url "$DATABASE_URL"
+python scripts/cost_breakdown.py --database-url "$DATABASE_URL"
 ```
 
 Quality degradation is treated as CI-failing when answers become too generic, omit required clarifying questions, or lose expected clinical specificity for the golden cases.  
@@ -172,6 +173,7 @@ Required for beta:
 - `WEB_OWNER_TOKEN`
 - `WEB_SESSION_SECRET`
 - dual-risk routing variables: `LLM_LOW_RISK_PROVIDER`, `LLM_LOW_RISK_MODEL`, `LLM_HIGH_RISK_PROVIDER`, `LLM_HIGH_RISK_MODEL`
+- hard FinOps variables: `LLM_MAX_OUTPUT_TOKENS_*`, `WEEKLY_COST_BUDGET_USD`, `WEEKLY_COST_ALARM_RATIO`
 - at least one provider key: `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, or `GEMINI_API_KEY`
 - for `APP_ENV=prod`, set non-mock `LLM_EMBEDDINGS_PROVIDER`, non-empty `LLM_EMBEDDINGS_MODEL`, and a matching provider API key
 

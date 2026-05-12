@@ -32,6 +32,9 @@ def test_product_analytics_summary_methods():
         service.track(user_id=user.id, event_name="voice_summary_generated", properties={})
         service.track(user_id=user.id, event_name="return_after_dropout_nudge", properties={"dropout_days": 4})
         service.track(user_id=user.id, event_name="learning_relaunched", properties={"after_days": 4})
+        service.track(user_id=user.id, event_name="journey_drop_detected", properties={"reason": "provider_error"})
+        service.track(user_id=user.id, event_name="journey_recovered", properties={"after_days": 1})
+        service.track(user_id=user.id, event_name="journey_state_changed", properties={"from": "activation", "to": "habit"})
         db.add(ProductEvent(user_id=user.id, event_name="search_performed", properties={"results": 0, "topic_title": "T"}, created_at=datetime.now(UTC) - timedelta(days=1)))
         db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 0, "memory_hits": 0, "document_hits": 0}))
         db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 3, "memory_hits": 2, "document_hits": 1}))
@@ -48,6 +51,8 @@ def test_product_analytics_summary_methods():
         summary = service.behavior_summary(days=30)
         adherence = service.learning_adherence(days=30)
         conversions = service.ux_conversion_summary(days=30)
+        journey = service.journey_health(days=30)
+        outcomes = service.learning_outcomes(days=30)
         assert "events" in summary
         assert summary["events"].get("onboarding_step_completed", 0) == 1
         assert summary["events"].get("weekly_recap_opened", 0) == 1
@@ -57,5 +62,11 @@ def test_product_analytics_summary_methods():
         assert conversions["document_to_cards"]["cards_created_from_document"] == 1
         assert conversions["voice_to_summary"]["generated"] == 1
         assert conversions["return_after_dropout"]["nudges"] == 1
+        assert journey["drop_points"]["provider_error"] == 1
+        assert journey["recovery_rate"] == 1.0
+        assert journey["first_week_completion_rate"] == 1.0
+        assert "learning_gain_proxy" in outcomes
+        assert "difficulty_fit" in outcomes
+        assert "dropout_risk_score" in outcomes
     finally:
         db.close()

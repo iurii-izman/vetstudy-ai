@@ -1,13 +1,19 @@
 import { EmptyState, LoadingState } from '../../shared/ui/States'
 import { formatDate } from '../../shared/utils'
 
-export function AdminScreen({ feedback, analyticsSummary, stats, trustTrace, onUpdateFeedback, pendingFeedbackIds, loading }) {
+export function AdminScreen({ feedback, analyticsSummary, costBudgetAlert, stats, trustTrace, onUpdateFeedback, pendingFeedbackIds, loading }) {
   if (loading) return <LoadingState label="Loading admin dashboard..." />
   const openFeedback = feedback.filter((x) => x.feedback_type !== 'up' && x.status !== 'resolved' && x.status !== 'ignored')
   const highRiskCount = analyticsSummary?.behavior?.high_risk_query_count || 0
   const zeroResultSearches = analyticsSummary?.content_gap_report?.zero_results_total || 0
   const zeroByTopic = analyticsSummary?.content_gap_report?.zero_results_by_topic || {}
+  const journeyHealth = analyticsSummary?.journey_health || {}
   const weakTopics = Object.entries(zeroByTopic).map(([t, c]) => `${t} (${c})`).join(', ') || 'None'
+  const dropPoints = Object.entries(journeyHealth.drop_points || {})
+  const dropPointsLabel = dropPoints.length ? dropPoints.map(([k, v]) => `${k} (${v})`).join(', ') : 'none'
+  const budgetLevel = costBudgetAlert?.alert_level || 'unknown'
+  const budgetTopModel = costBudgetAlert?.top_models?.[0]
+  const budgetTopModelLabel = budgetTopModel ? `${budgetTopModel.provider}/${budgetTopModel.model}` : 'n/a'
 
   return (
     <section className="settings-view">
@@ -15,6 +21,25 @@ export function AdminScreen({ feedback, analyticsSummary, stats, trustTrace, onU
         <div className="settings-panel">
           <h2>Analytics & Health</h2>
           <dl><dt>Weak topics (zero results)</dt><dd>{weakTopics}</dd><dt>Due cards</dt><dd>{stats?.due_flashcards || 0}</dd><dt>High-risk count</dt><dd>{highRiskCount}</dd><dt>Zero-result searches</dt><dd>{zeroResultSearches}</dd></dl>
+        </div>
+        <div className="settings-panel">
+          <h2>Journey Health</h2>
+          <dl>
+            <dt>Drop points</dt><dd>{dropPointsLabel}</dd>
+            <dt>Recovery rate</dt><dd>{Math.round((journeyHealth.recovery_rate || 0) * 100)}%</dd>
+            <dt>First-week completion</dt><dd>{Math.round((journeyHealth.first_week_completion_rate || 0) * 100)}%</dd>
+            <dt>First value ≤10m</dt><dd>{Math.round((journeyHealth.first_value_10m_rate || 0) * 100)}%</dd>
+          </dl>
+        </div>
+        <div className="settings-panel">
+          <h2>Weekly Cost Budget</h2>
+          <dl>
+            <dt>Alert level</dt><dd>{budgetLevel}</dd>
+            <dt>This week cost</dt><dd>${Number(costBudgetAlert?.cost_usd_current_week || 0).toFixed(4)}</dd>
+            <dt>Budget</dt><dd>${Number(costBudgetAlert?.weekly_budget_usd || 0).toFixed(4)}</dd>
+            <dt>Remaining</dt><dd>${Number(costBudgetAlert?.remaining_usd || 0).toFixed(4)}</dd>
+            <dt>Top model</dt><dd>{budgetTopModelLabel}</dd>
+          </dl>
         </div>
         <div className="settings-panel wide">
           <h2>Trust &amp; Safety trace</h2>

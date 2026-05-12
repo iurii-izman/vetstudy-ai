@@ -15,15 +15,27 @@ def topic_required_text(thread_id: int | None) -> str:
 
 
 def provider_error_text() -> str:
-    return "Провайдер временно недоступен. Следующий шаг: проверьте /status и повторите через 1-2 минуты."
+    return (
+        "Действие: открой /status и проверь доступность модели.\n"
+        "Альтернатива: запусти /today light или /review, чтобы не терять темп.\n"
+        "Цель: сохранить ежедневный учебный прогресс, даже если провайдер недоступен."
+    )
 
 
 def quota_error_text() -> str:
-    return "Лимит запросов/бюджета исчерпан. Следующий шаг: переключитесь на /review или /today и попробуйте снова после обновления лимита."
+    return (
+        "Действие: перейди в /review и закрой 2-3 карточки.\n"
+        "Альтернатива: используй /today light для плана без новых дорогих генераций.\n"
+        "Цель: продолжать обучение до обновления лимита без просадки в привычке."
+    )
 
 
 def safety_error_text() -> str:
-    return "Для безопасного ответа не хватает данных. Следующий шаг: укажите вид, вес, возраст, симптомы и точный препарат/ситуацию."
+    return (
+        "Действие: добавь вид, вес, возраст, симптомы и точный препарат/ситуацию.\n"
+        "Альтернатива: потренируй клиническое мышление на /case basic без риска для реального пациента.\n"
+        "Цель: получить учебно-полезный и безопасный разбор вместо опасных догадок."
+    )
 
 
 def minimal_next_questions(*, safety=None, evidence_payload: dict | None = None, limit: int = 3) -> list[str]:
@@ -80,13 +92,21 @@ def why_payload_for_meta(meta: dict | None) -> dict:
 def next_step_keyboard(context: str) -> InlineKeyboardMarkup:
     if context == "quota":
         rows = [
-            [InlineKeyboardButton(text="🔁 Повторить /review", switch_inline_query_current_chat="/review")],
-            [InlineKeyboardButton(text="📅 Открыть /today", switch_inline_query_current_chat="/today light")],
+            [InlineKeyboardButton(text="🔁 Открыть /review", switch_inline_query_current_chat="/review")],
+            [InlineKeyboardButton(text="📅 План /today light", switch_inline_query_current_chat="/today light")],
+            [InlineKeyboardButton(text="🩺 Безопасный /case", switch_inline_query_current_chat="/case basic")],
         ]
     elif context == "provider":
         rows = [
             [InlineKeyboardButton(text="📊 Проверить /status", switch_inline_query_current_chat="/status")],
-            [InlineKeyboardButton(text="📅 Открыть /today", switch_inline_query_current_chat="/today standard")],
+            [InlineKeyboardButton(text="📅 План /today light", switch_inline_query_current_chat="/today light")],
+            [InlineKeyboardButton(text="🔁 Открыть /review", switch_inline_query_current_chat="/review")],
+        ]
+    elif context == "first_value":
+        rows = [
+            [InlineKeyboardButton(text="⚡ Start 10-min route", switch_inline_query_current_chat="/today standard")],
+            [InlineKeyboardButton(text="🩺 Mini-case now", switch_inline_query_current_chat="/case basic")],
+            [InlineKeyboardButton(text="🔁 Quick review", switch_inline_query_current_chat="/review")],
         ]
     else:
         rows = [
@@ -97,5 +117,6 @@ def next_step_keyboard(context: str) -> InlineKeyboardMarkup:
         rows = [
             [InlineKeyboardButton(text="🩺 Перейти в /case", switch_inline_query_current_chat="/case basic")],
             [InlineKeyboardButton(text="🔁 Перейти в /review", switch_inline_query_current_chat="/review")],
+            [InlineKeyboardButton(text="📅 Обновить /today", switch_inline_query_current_chat="/today standard")],
         ]
     return InlineKeyboardMarkup(inline_keyboard=rows)

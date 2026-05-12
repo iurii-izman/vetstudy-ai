@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 
-from app.db.models import FeedbackEvent, Message, ProductEvent, ReviewEvent, Session as ChatSession, Topic
+from app.db.models import FeedbackEvent, Message, ProductEvent, ReviewEvent, Session as ChatSession, Topic, User
 
 from app.db.models import Flashcard
 from app.db.repositories import FlashcardRepo
@@ -35,6 +35,11 @@ class DailyLearningRoute:
     zero_result_searches: int
     negative_feedback_count: int
     high_risk_block_count: int
+    skill_map: dict[str, dict[str, float | int | str]]
+    difficulty_band: str
+    progression_mode: str
+    recovery_mode: bool
+    why_personalization: str
 
 
 @dataclass
@@ -64,12 +69,72 @@ class WeeklyLearningPlan:
     overdue_count: int
     streak_days: int
     relaunch_days: int
+    workload_budget: int
+    total_density: int
+    why_plan: str
 
 
 class LearningService:
     CARD_SCHEMA_HINT = '{"cards":[{"front":"...","back":"...","card_type":"fact|cloze|case_next_step|risk_check|owner_explain","difficulty":"easy|medium|hard","needs_manual_check":false,"tags":["..."]}]}'
     QUIZ_SCHEMA_HINT = '{"quiz":[{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"correct_answer":"A|B|C|D","explanation":"...","difficulty":"easy|medium|hard","tags":["..."]}]}'
     DAY_MODES = {"light": {"minutes": 15, "review_n": 2}, "standard": {"minutes": 25, "review_n": 3}, "intensive": {"minutes": 40, "review_n": 5}}
+    DIFFICULTY_LEVELS = ("easy", "medium", "hard")
+
+    def _difficulty_from_skill_map(self, skill_map: dict[str, dict[str, float | int | str]]) -> str:
+        if not skill_map:
+            return "medium"
+        avg_conf = sum(float(item.get("confidence", 0.5) or 0.5) for item in skill_map.values()) / max(1, len(skill_map))
+        avg_errors = sum(float(item.get("errors", 0) or 0) for item in skill_map.values()) / max(1, len(skill_map))
+        if avg_conf < 0.4 or avg_errors >= 2:
+            return "easy"
+        if avg_conf > 0.72 and avg_errors <= 1:
+            return "hard"
+        return "medium"
+
+    def _build_skill_map(
+        self,
+        *,
+        weak_topics: list[str],
+        zero_result_searches: int,
+        negative_feedback_count: int,
+        high_risk_block_count: int,
+        recent_case_difficulty: list[str],
+    ) -> dict[str, dict[str, float | int | str]]:
+        topic_counts: dict[str, int] = {}
+        for raw in weak_topics:
+            base = raw.split(":", 1)[-1] if ":" in raw else raw
+            name = base.strip().lower()
+            if not name:
+                continue
+            topic_counts[name] = topic_counts.get(name, 0) + 1
+        if not topic_counts:
+            topic_counts["triage_basics"] = 1
+        recent_level = (recent_case_difficulty[-1] if recent_case_difficulty else "basic").lower()
+        out: dict[str, dict[str, float | int | str]] = {}
+        for topic, errors in topic_counts.items():
+            base_conf = 0.65 - min(0.35, float(errors) * 0.1)
+            penalty = min(0.25, zero_result_searches * 0.03 + negative_feedback_count * 0.04 + high_risk_block_count * 0.02)
+            confidence = round(max(0.05, min(0.95, base_conf - penalty)), 2)
+            out[topic] = {
+                "confidence": confidence,
+                "errors": errors,
+                "recent_case_level": recent_level,
+                "updated_from": "review/case/feedback/search",
+            }
+        return out
+
+    def _persist_skill_map(self, *, db, user_id, skill_map: dict[str, dict[str, float | int | str]]) -> None:
+        if not hasattr(db, "add") or not hasattr(db, "commit"):
+            return
+        user = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+        if user is None:
+            return
+        settings = dict(user.settings or {})
+        learning = dict(settings.get("learning") or {})
+        learning["skill_map"] = skill_map
+        settings["learning"] = learning
+        user.settings = settings
+        db.commit()
 
     @staticmethod
     def _clip(text: str, min_len: int, max_len: int) -> str:
@@ -334,6 +399,22 @@ class LearningService:
             )
         ).all()
         recent_case_difficulty = [str((row[0] or {}).get("difficulty", "unknown")) for row in case_diff_rows][-5:]
+        weak_topics_extended = weak_topics + [f"recent_error:{x}" for x in recent_errors] + [f"case_difficulty:{x}" for x in recent_case_difficulty]
+        skill_map = self._build_skill_map(
+            weak_topics=weak_topics_extended,
+            zero_result_searches=zero_result_searches,
+            negative_feedback_count=negative_feedback_count,
+            high_risk_block_count=high_risk_block_count,
+            recent_case_difficulty=recent_case_difficulty,
+        )
+        difficulty_band = self._difficulty_from_skill_map(skill_map)
+        progression_mode = "controlled_progression"
+        recovery_mode = bool(overdue_count >= 5 or (reviewed_today == 0 and len(due_cards) > 0))
+        if recovery_mode:
+            progression_mode = "recovery"
+            mode = "light"
+            mode_cfg = self.DAY_MODES[mode]
+            difficulty_band = "easy"
         topic_title = None
         if topic_id is not None:
             topic_row = db.execute(select(Topic.title).where(Topic.id == topic_id)).one_or_none()
@@ -358,9 +439,18 @@ class LearningService:
                 zero_result_searches=zero_result_searches,
                 negative_feedback_count=negative_feedback_count,
                 high_risk_block_count=high_risk_block_count,
+                skill_map=skill_map,
+                difficulty_band=difficulty_band,
+                progression_mode=progression_mode,
+                recovery_mode=recovery_mode,
+                why_personalization=f"fallback; difficulty={difficulty_band}; weak_topics={len(weak_topics)}; recovery={str(recovery_mode).lower()}",
             )
 
         review_target = int(mode_cfg["review_n"])
+        if difficulty_band == "easy":
+            review_target = max(2, review_target - 1)
+        elif difficulty_band == "hard":
+            review_target = min(6, review_target + 1)
         review_cards = [card.front for card in due_cards[:review_target]]
         if len(review_cards) < review_target:
             seen = set(review_cards)
@@ -397,6 +487,7 @@ class LearningService:
             reflection_question = "Как переформулировать вопрос так, чтобы поиск дал контекст вместо нулевого результата?"
         if overdue_count >= 5:
             reflection_question = "Как сократить backlog карточек: какие 2 карточки повторишь первыми, чтобы снять перегруз?"
+        self._persist_skill_map(db=db, user_id=user_id, skill_map=skill_map)
 
         return DailyLearningRoute(
             mode=mode,
@@ -407,10 +498,18 @@ class LearningService:
             review_cards=review_cards[:review_target],
             reflection_question=reflection_question,
             used_fallback=False,
-            weak_topics=weak_topics + [f"recent_error:{x}" for x in recent_errors] + [f"case_difficulty:{x}" for x in recent_case_difficulty],
+            weak_topics=weak_topics_extended,
             zero_result_searches=zero_result_searches,
             negative_feedback_count=negative_feedback_count,
             high_risk_block_count=high_risk_block_count,
+            skill_map=skill_map,
+            difficulty_band=difficulty_band,
+            progression_mode=progression_mode,
+            recovery_mode=recovery_mode,
+            why_personalization=(
+                f"difficulty={difficulty_band}; progression={progression_mode}; "
+                f"weak_topics={len(weak_topics_extended)}; overdue={overdue_count}; high_risk={high_risk_block_count}"
+            ),
         )
 
     def build_week_plan(self, *, db, user_id, topic_id=None, now: datetime | None = None) -> WeeklyLearningPlan:
@@ -418,18 +517,34 @@ class LearningService:
         route = self.build_daily_route(db=db, user_id=user_id, topic_id=topic_id, now=now, mode="standard")
         streak_days, relaunch_days = self.compute_streak(db=db, user_id=user_id, now=now)
         modes = ["light", "standard", "intensive", "standard", "light", "intensive", "standard"]
+        workload_budget = 9 if route.recovery_mode else 13 if route.difficulty_band == "medium" else 15
+        density = {"light": 1, "standard": 2, "intensive": 3}
         days: list[WeeklyPlanDay] = []
+        used_budget = 0
         for day_idx in range(1, 8):
             mode = modes[day_idx - 1]
+            if route.recovery_mode and day_idx <= 3:
+                mode = "light"
+            day_load = density.get(mode, 2)
+            if used_budget + day_load > workload_budget:
+                mode = "light"
+                day_load = 1
+            used_budget += day_load
             focus = route.weak_topics[(day_idx - 1) % max(1, len(route.weak_topics))] if route.weak_topics else "triage_basics"
+            review_target = 2 if mode == "light" else 4 if mode == "standard" else 6
+            quiz_target = 1 if mode == "light" else 2
+            if route.difficulty_band == "easy":
+                quiz_target = 1
+            if route.due_count > 4:
+                review_target = max(review_target, 4)
             days.append(
                 WeeklyPlanDay(
                     day_index=day_idx,
                     focus=focus,
                     mode=mode,
                     mini_case=f"День {day_idx}: {route.mini_case}",
-                    review_target=2 if mode == "light" else 4 if mode == "standard" else 6,
-                    quiz_target=1 if mode == "light" else 2,
+                    review_target=review_target,
+                    quiz_target=quiz_target,
                     planned_commands=["/today", "/case", "/review", "/quiz"],
                 )
             )
@@ -439,6 +554,12 @@ class LearningService:
             overdue_count=route.due_count,
             streak_days=streak_days,
             relaunch_days=relaunch_days,
+            workload_budget=workload_budget,
+            total_density=used_budget,
+            why_plan=(
+                f"prioritize weak topics ({len(route.weak_topics)}), overdue={route.due_count}, "
+                f"high-risk={route.high_risk_block_count}, density={used_budget}/{workload_budget}"
+            ),
         )
 
     def build_weekly_recap(self, *, db, user_id, now: datetime | None = None) -> WeeklyRecap:

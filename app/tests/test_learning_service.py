@@ -200,6 +200,11 @@ def test_build_week_plan(monkeypatch):
             zero_result_searches=1,
             negative_feedback_count=0,
             high_risk_block_count=0,
+            skill_map={"therapy": {"confidence": 0.5, "errors": 1, "recent_case_level": "basic", "updated_from": "review/case/feedback/search"}},
+            difficulty_band="medium",
+            progression_mode="controlled_progression",
+            recovery_mode=False,
+            why_personalization="why",
         ),
     )
     monkeypatch.setattr(LearningService, "compute_streak", lambda self, **kwargs: (5, 2))

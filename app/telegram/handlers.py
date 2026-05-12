@@ -34,8 +34,11 @@ from app.telegram.formatting import TELEGRAM_HTML_PARSE_MODE, format_ai_answer_f
 from app.telegram.onboarding import ONBOARDING_STEPS, REGION_VALUES, RESPONSE_DENSITY_VALUES, SPECIES_VALUES
 from app.telegram.onboarding import apply_response_density as _apply_response_density
 from app.telegram.onboarding import complete_onboarding_step as _complete_onboarding_step
+from app.telegram.onboarding import infer_journey_state as _infer_journey_state
+from app.telegram.onboarding import next_journey_step as _next_journey_step
 from app.telegram.onboarding import onboarding_state as _onboarding_state
 from app.telegram.onboarding import save_onboarding_state as _save_onboarding_state
+from app.telegram.onboarding import set_journey_state as _set_journey_state
 from app.telegram.onboarding import user_profile as _user_profile
 from app.telegram.ux import guided_clarification_keyboard as _guided_clarification_keyboard
 from app.telegram.ux import minimal_next_questions as _minimal_next_questions
@@ -359,6 +362,12 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             await _send_typing(message)
             quota = QuotaGuard(get_settings()).check_user_and_global(db, user)
             if not quota.allowed:
+                ProductAnalyticsService(db).track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    event_name="journey_drop_detected",
+                    properties={"reason": "quota_block", "stage": _infer_journey_state(user)},
+                )
                 await message.answer(quota.message or _quota_error_text(), reply_markup=_next_step_keyboard("quota"))
                 return
             chat_db = ChatDBService(db)
@@ -386,6 +395,12 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                     session_id=session.id,
                     event_name="safety_clarification_required",
                     properties={"risk_tags": getattr(safety, "risk_tags", [])},
+                )
+                analytics.track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    event_name="journey_drop_detected",
+                    properties={"reason": "safety_block", "stage": _infer_journey_state(user)},
                 )
                 await message.answer(warn, reply_markup=_guided_clarification_keyboard())
                 return
@@ -486,6 +501,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 event_name="activation_first_answer",
                 properties={"effective_mode": effective_mode, "high_risk": high_risk},
             )
+            _set_journey_state(user=user, state="activation", reason="first_answer_generated", analytics=analytics, topic_id=topic.id)
             if (metadata or {}).get("source_type") == "voice":
                 analytics.track(
                     user_id=user.id,
@@ -528,6 +544,12 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             return
         except RuntimeError:
             ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "provider"})
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                topic_id=topic.id,
+                event_name="journey_drop_detected",
+                properties={"reason": "provider_error", "stage": _infer_journey_state(user)},
+            )
             ErrorEventRepo(db).add(
                 user_id=user.id,
                 scope="telegram",
@@ -540,6 +562,12 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
         except Exception as exc:
             mapped = map_pipeline_error(exc)
             if mapped.category == "quota_error":
+                ProductAnalyticsService(db).track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    event_name="journey_drop_detected",
+                    properties={"reason": "quota_error", "stage": _infer_journey_state(user)},
+                )
                 await message.answer(_quota_error_text(), reply_markup=_next_step_keyboard("quota"))
                 return
             ErrorEventRepo(db).add(
@@ -564,6 +592,7 @@ async def cmd_start(message: Message):
     if await _deny_if_not_allowed(message):
         return
     db = new_session()
+    first_step = {"command": "/create_default_topics", "fallback": "/bind_topic pharmacology", "goal": "получить первый учебный маршрут"}
     try:
         try:
             user = UserRepo(db).get_or_create(message.from_user.id, message.from_user.full_name if message.from_user else None)
@@ -575,16 +604,27 @@ async def cmd_start(message: Message):
                 _save_onboarding_state(user, onboarding)
                 analytics.track(user_id=user.id, event_name="onboarding_started", properties={"steps_total": len(ONBOARDING_STEPS)})
                 db.commit()
+            first_step = _next_journey_step(user=user, context="start")
         except Exception:
             logger.debug("activation_start_track_failed", exc_info=True)
     finally:
         db.close()
     await message.answer(
-        "VetStudy AI готов. Онбординг (3 шага):\n"
+        "VetStudy AI готов. First value за 10 минут:\n"
+        "1) /today standard\n"
+        "2) /case basic\n"
+        "3) /review\n\n"
+        "Онбординг (3 шага):\n"
         "1) Привяжи учебный topic: /create_default_topics или /bind_topic <slug_or_name>\n"
         "2) Открой персональный маршрут: /today\n"
         "3) Запусти клинический кейс: /case basic\n\n"
-        "CTA: начни с шага 1 прямо сейчас.",
+        f"CTA: {first_step['command']}\n"
+        f"Fallback: {first_step['fallback']}\n"
+        f"Цель: {first_step['goal']}.",
+        reply_markup=_next_step_keyboard("first_value"),
+    )
+    await message.answer(
+        "One-tap сценарий: нажми кнопку ниже и закрой today+case+review без переключения контекста.",
         reply_markup=_build_main_menu_reply_keyboard(),
     )
 
@@ -945,6 +985,13 @@ async def cmd_why(message: Message):
         if missing_data:
             lines.append("- каких данных не хватило:")
             lines.extend([f"  • {item}" for item in missing_data[:3]])
+        learning_ctx = dict(((user.settings or {}).get("learning") or {}))
+        route_ctx = dict(learning_ctx.get("last_route") or {})
+        if route_ctx:
+            lines.append("- personalization:")
+            lines.append(f"  • difficulty: {route_ctx.get('difficulty_band', 'medium')}")
+            lines.append(f"  • progression: {route_ctx.get('progression_mode', 'controlled_progression')}")
+            lines.append(f"  • why: {route_ctx.get('why_personalization', 'n/a')}")
         lines.append("Без внутренних системных промптов и секретов.")
         await message.answer("\n".join(lines))
     finally:
@@ -1254,15 +1301,41 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
                 "negative_feedback_count": route.negative_feedback_count,
                 "high_risk_block_count": route.high_risk_block_count,
                 "streak_days": streak_days,
+                "difficulty_band": route.difficulty_band,
+                "progression_mode": route.progression_mode,
+                "recovery_mode": route.recovery_mode,
+                "why_personalization": route.why_personalization,
             },
         )
+        settings = dict(user.settings or {})
+        learning = dict(settings.get("learning") or {})
+        learning["last_route"] = {
+            "difficulty_band": route.difficulty_band,
+            "progression_mode": route.progression_mode,
+            "recovery_mode": route.recovery_mode,
+            "why_personalization": route.why_personalization,
+        }
+        settings["learning"] = learning
+        user.settings = settings
+        db.commit()
         if streak_days in {3, 7, 14, 30}:
             analytics.track(user_id=user.id, topic_id=topic.id, event_name="streak_milestone_reached", properties={"days": streak_days})
         if relaunch_days > 0:
             analytics.track(user_id=user.id, topic_id=topic.id, event_name="learning_relaunched", properties={"after_days": relaunch_days})
+            analytics.track(
+                user_id=user.id,
+                topic_id=topic.id,
+                event_name="journey_recovered",
+                properties={"after_days": relaunch_days, "from": "dropout"},
+            )
         if relaunch_days >= 3:
             analytics.track(user_id=user.id, topic_id=topic.id, event_name="return_after_dropout_nudge", properties={"dropout_days": relaunch_days})
         _complete_onboarding_step(user=user, step="today_route", analytics=analytics, topic_id=topic.id)
+        if route.due_count >= 2 and route.high_risk_block_count == 0:
+            _set_journey_state(user=user, state="habit", reason="stable_daily_route", analytics=analytics, topic_id=topic.id)
+        else:
+            _set_journey_state(user=user, state="activation", reason="daily_route_opened", analytics=analytics, topic_id=topic.id)
+        journey_next = _next_journey_step(user=user, context="today")
         lines = [
             f"Маршрут на {route.plan_minutes} минут ({route.mode}):",
             f"1) Мини-кейс: {route.mini_case}",
@@ -1281,7 +1354,9 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
         if route.high_risk_block_count > 0:
             lines.append(f"High-risk блокировок за 7 дней: {route.high_risk_block_count}")
         lines.append(f"Streak: {streak_days} дн.")
+        lines.append(f"Difficulty: {route.difficulty_band} | Progression: {route.progression_mode}")
         lines.append(f"5) Reflection: {route.reflection_question}")
+        lines.append(f"Следующий шаг ({journey_next['state']}): {journey_next['command']} -> цель: {journey_next['goal']}")
         if relaunch_days > 0:
             lines.append(f"Возврат после паузы: {relaunch_days} дн. Отличный рестарт, продолжай в комфортном темпе.")
         if relaunch_days >= 3:
@@ -1315,11 +1390,16 @@ async def cmd_plan_week(message: Message):
                 "overdue_count": plan.overdue_count,
                 "streak_days": plan.streak_days,
                 "weak_topics_count": len(plan.weak_topics),
+                "workload_budget": plan.workload_budget,
+                "total_density": plan.total_density,
+                "why_plan": plan.why_plan,
             },
         )
         lines = [
             "Персональный план на 7 дней:",
             f"Streak: {plan.streak_days} дн., overdue карточек: {plan.overdue_count}",
+            f"Cognitive load: density {plan.total_density}/{plan.workload_budget}",
+            f"Why this plan: {plan.why_plan}",
         ]
         for day in plan.days:
             lines.append(
@@ -1543,7 +1623,12 @@ async def cmd_case_answer(message: Message):
         await _send_typing(message)
         quota = QuotaGuard(get_settings()).check_user_and_global(db, user)
         if not quota.allowed:
-            await message.answer(_quota_error_text())
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                event_name="journey_drop_detected",
+                properties={"reason": "case_quota_block", "stage": _infer_journey_state(user)},
+            )
+            await message.answer(_quota_error_text(), reply_markup=_next_step_keyboard("quota"))
             return
 
         prompt = prompt_manager.build_case_eval(
@@ -1619,11 +1704,21 @@ async def cmd_case_answer(message: Message):
             category="case_eval_provider_error",
             details={"case_id": case_id},
         )
-        await message.answer(_provider_error_text())
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            event_name="journey_drop_detected",
+            properties={"reason": "case_provider_error", "stage": _infer_journey_state(user)},
+        )
+        await message.answer(_provider_error_text(), reply_markup=_next_step_keyboard("provider"))
     except Exception as exc:
         mapped = map_pipeline_error(exc)
         if mapped.category == "quota_error":
-            await message.answer(_quota_error_text())
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                event_name="journey_drop_detected",
+                properties={"reason": "case_quota_error", "stage": _infer_journey_state(user)},
+            )
+            await message.answer(_quota_error_text(), reply_markup=_next_step_keyboard("quota"))
         else:
             ErrorEventRepo(db).add(
                 user_id=user.id,

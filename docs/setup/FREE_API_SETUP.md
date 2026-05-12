@@ -36,7 +36,7 @@ OPENAI_API_KEY=
 GEMINI_API_KEY=
 
 LLM_HIGH_RISK_PROVIDER=openai
-LLM_HIGH_RISK_MODEL=gpt-5.4
+LLM_HIGH_RISK_MODEL=gpt-5.4-mini
 LLM_LOW_RISK_PROVIDER=gemini
 LLM_LOW_RISK_MODEL=gemini-2.5-flash-lite
 LLM_EMBEDDINGS_PROVIDER=openai
@@ -49,7 +49,7 @@ LLM_EMBEDDINGS_MODEL=text-embedding-3-small
 - cost limits снижены для безопасного теста
 
 Dual-routing поведение:
-- high-risk intent/risk_tags идёт в paid high-risk модель (`openai/gpt-5.4` по умолчанию);
+- high-risk intent/risk_tags идёт в paid high-risk модель (`openai/gpt-5.4-mini` по умолчанию);
 - low-risk/general идёт в free low-risk модель (`gemini/gemini-2.5-flash-lite` по умолчанию);
 - fallback раздельный: для high-risk сначала `gemini-2.5-pro` (если доступен Gemini key), для low-risk сначала `gemini-2.5-flash`, затем стандартный fallback.
 

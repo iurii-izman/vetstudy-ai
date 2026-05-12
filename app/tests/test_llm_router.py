@@ -110,6 +110,17 @@ class ZeroCostProvider(OkProvider):
         return LLMResponse(text="ok", model="unknown-model", provider="unknown-provider", input_tokens=1000, output_tokens=1000, cost_usd=0.0)
 
 
+class MetadataProbeProvider(OkProvider):
+    def __init__(self, name: str = "probe", model: str = "probe-model"):
+        self.name = name
+        self.model = model
+        self.last_metadata = None
+
+    async def generate(self, messages, system_prompt, response_format=None, tools=None, metadata=None):
+        self.last_metadata = dict(metadata or {})
+        return LLMResponse(text="ok", model=self.model, provider=self.name, input_tokens=1, output_tokens=1, cost_usd=0.0)
+
+
 def test_cost_estimate_used_when_provider_missing_cost():
     db = _make_db()
     s = _settings()
@@ -120,6 +131,121 @@ def test_cost_estimate_used_when_provider_missing_cost():
     row = db.execute(select(ModelCall).where(ModelCall.status == "ok").order_by(ModelCall.created_at.desc())).scalars().first()
     assert row is not None
     assert float(row.cost_usd) > 0.0
+
+
+class ZeroCostOpenAISnapshotProvider(OkProvider):
+    def __init__(self, model: str):
+        self.model = model
+        self.name = "openai"
+
+    async def generate(self, messages, system_prompt, response_format=None, tools=None, metadata=None):
+        return LLMResponse(text="ok", model=self.model, provider=self.name, input_tokens=1000, output_tokens=2000, cost_usd=0.0)
+
+
+def test_openai_snapshot_pricing_uses_prefix_match():
+    db = _make_db()
+    s = _settings()
+    s.llm_cost_estimate_input_per_1k = 0.1
+    s.llm_cost_estimate_output_per_1k = 0.2
+    router = LLMRouter(
+        settings=s,
+        primary=ZeroCostOpenAISnapshotProvider("gpt-5.4-mini-2026-03-05"),
+        fallback=ZeroCostOpenAISnapshotProvider("gpt-5.4-mini-2026-03-05"),
+        classification=ZeroCostOpenAISnapshotProvider("gpt-5.4-mini-2026-03-05"),
+        summary=ZeroCostOpenAISnapshotProvider("gpt-5.4-mini-2026-03-05"),
+        embeddings=OkProvider(),
+    )
+    asyncio.run(router.generate(db, user_id=None, prompt="x"))
+    row = db.execute(select(ModelCall).where(ModelCall.status == "ok").order_by(ModelCall.created_at.desc())).scalars().first()
+    assert row is not None
+    # 1K input * 0.00075 + 2K output * 0.0045
+    assert abs(float(row.cost_usd) - 0.00975) < 1e-9
+
+
+def test_openai_snapshot_pricing_uses_exact_match_when_available():
+    db = _make_db()
+    s = _settings()
+    s.llm_cost_estimate_input_per_1k = 0.1
+    s.llm_cost_estimate_output_per_1k = 0.2
+    router = LLMRouter(
+        settings=s,
+        primary=ZeroCostOpenAISnapshotProvider("gpt-4.1-mini-2025-04-14"),
+        fallback=ZeroCostOpenAISnapshotProvider("gpt-4.1-mini-2025-04-14"),
+        classification=ZeroCostOpenAISnapshotProvider("gpt-4.1-mini-2025-04-14"),
+        summary=ZeroCostOpenAISnapshotProvider("gpt-4.1-mini-2025-04-14"),
+        embeddings=OkProvider(),
+    )
+    asyncio.run(router.generate(db, user_id=None, prompt="x"))
+    row = db.execute(select(ModelCall).where(ModelCall.status == "ok").order_by(ModelCall.created_at.desc())).scalars().first()
+    assert row is not None
+    # 1K input * 0.0004 + 2K output * 0.0016
+    assert abs(float(row.cost_usd) - 0.0036) < 1e-9
+
+
+def test_output_cap_for_dosage_intent(monkeypatch):
+    db = _make_db()
+    s = _settings()
+    s.llm_max_output_tokens_dosage = 123
+    s.gemini_api_key = ""
+    probe = MetadataProbeProvider(name="openai", model="gpt-5.4-mini")
+
+    def _build_provider(_name: str, _model: str, _settings):
+        return probe
+
+    monkeypatch.setattr("app.services._build_provider", _build_provider)
+
+    router = LLMRouter(
+        settings=s,
+        primary=OkProvider(),
+        fallback=probe,
+        classification=OkProvider(),
+        summary=OkProvider(),
+        embeddings=OkProvider(),
+    )
+    asyncio.run(
+        router.generate(
+            db,
+            user_id=None,
+            prompt="доза амоксициллина для кошки",
+            purpose="answer",
+            metadata={"safety": {"intent": "dosage_request", "risk_tags": []}},
+        )
+    )
+    assert probe.last_metadata is not None
+    assert probe.last_metadata.get("max_tokens") == 123
+
+
+def test_output_cap_respects_explicit_lower_max_tokens(monkeypatch):
+    db = _make_db()
+    s = _settings()
+    s.llm_max_output_tokens_low_risk = 520
+    s.gemini_api_key = ""
+    probe = MetadataProbeProvider(name="gemini", model="gemini-2.5-flash-lite")
+
+    def _build_provider(_name: str, _model: str, _settings):
+        return probe
+
+    monkeypatch.setattr("app.services._build_provider", _build_provider)
+
+    router = LLMRouter(
+        settings=s,
+        primary=OkProvider(),
+        fallback=probe,
+        classification=OkProvider(),
+        summary=OkProvider(),
+        embeddings=OkProvider(),
+    )
+    asyncio.run(
+        router.generate(
+            db,
+            user_id=None,
+            prompt="объясни воспаление простыми словами",
+            purpose="answer",
+            metadata={"safety": {"intent": "general_education", "risk_tags": []}, "max_tokens": 90},
+        )
+    )
+    assert probe.last_metadata is not None
+    assert probe.last_metadata.get("max_tokens") == 90
 
 
 def test_answer_purpose_uses_dual_risk_chain_not_injected_primary():

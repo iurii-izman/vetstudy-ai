@@ -23,10 +23,21 @@ logger = logging.getLogger("app.ai.router")
 PRICE_PER_1K: dict[tuple[str, str], tuple[float, float]] = {
     ("openai", "gpt-4o-mini"): (0.00015, 0.0006),
     ("openai", "gpt-4.1-mini"): (0.0004, 0.0016),
+    ("openai", "gpt-4.1-mini-2025-04-14"): (0.0004, 0.0016),
+    ("openai", "gpt-5.4"): (0.0025, 0.015),
+    ("openai", "gpt-5.4-2026-03-05"): (0.0025, 0.015),
+    ("openai", "gpt-5.4-mini"): (0.00075, 0.0045),
     ("openrouter", "openai/gpt-4o-mini"): (0.0002, 0.0008),
     ("groq", "llama-3.3-70b-versatile"): (0.00059, 0.00079),
     ("groq", "llama-3.1-8b-instant"): (0.00005, 0.00008),
     ("gemini", "gemini-2.0-flash"): (0.0001, 0.0004),
+}
+
+PRICE_PREFIX_PER_1K: dict[tuple[str, str], tuple[float, float]] = {
+    # Official OpenAI list prices (input/output) represented per 1K tokens.
+    ("openai", "gpt-4.1-mini-"): (0.0004, 0.0016),
+    ("openai", "gpt-5.4-mini-"): (0.00075, 0.0045),
+    ("openai", "gpt-5.4-"): (0.0025, 0.015),
 }
 
 
@@ -108,7 +119,16 @@ class LLMRouter:
         purpose: str = "answer",
     ) -> str:
         payload_messages = messages or [{"role": "user", "content": prompt or ""}]
-        providers_chain, route_decision, route_reason = self._providers_for_purpose(purpose, payload_messages, metadata or {})
+        base_metadata = dict(metadata or {})
+        providers_chain, route_decision, route_reason = self._providers_for_purpose(purpose, payload_messages, base_metadata)
+        max_output_tokens = self._resolve_max_output_tokens(
+            purpose=purpose,
+            messages=payload_messages,
+            metadata=base_metadata,
+            route_decision=route_decision,
+        )
+        if max_output_tokens is not None:
+            base_metadata["max_tokens"] = max_output_tokens
         self.cost_guard.check_budget(db)
         self.cost_guard.check_request_tokens(payload_messages, self.settings.llm_max_request_tokens)
         last_error: Exception | None = None
@@ -138,7 +158,13 @@ class LLMRouter:
                         system_prompt=system_prompt,
                         response_format=response_format,
                         tools=tools,
-                        metadata={**(metadata or {}), "purpose": purpose, "model": model, "route_decision": route_decision, "route_reason": route_reason},
+                        metadata={
+                            **base_metadata,
+                            "purpose": purpose,
+                            "model": model,
+                            "route_decision": route_decision,
+                            "route_reason": route_reason,
+                        },
                     )
                 latency_ms = int((time.perf_counter() - t0) * 1000)
                 validated = self.validator.validate(question=payload_messages[-1].get("content", ""), answer=response.text)
@@ -266,6 +292,46 @@ class LLMRouter:
             return True, f"risk_tags={','.join(gate_result.risk_tags)}"
         return False, f"intent={gate_result.intent}"
 
+    def _resolve_max_output_tokens(
+        self,
+        *,
+        purpose: str,
+        messages: list[dict[str, str]],
+        metadata: dict[str, Any],
+        route_decision: str,
+    ) -> int | None:
+        cap = int(self.settings.llm_max_output_tokens_default)
+        if purpose == "answer":
+            intent = self._infer_intent(messages=messages, metadata=metadata)
+            if intent == "dosage_request":
+                cap = int(self.settings.llm_max_output_tokens_dosage)
+            elif intent == "toxicology":
+                cap = int(self.settings.llm_max_output_tokens_toxicology)
+            elif intent == "emergency_or_red_flag":
+                cap = int(self.settings.llm_max_output_tokens_emergency)
+            elif route_decision == "high_risk":
+                cap = int(self.settings.llm_max_output_tokens_high_risk)
+            else:
+                cap = int(self.settings.llm_max_output_tokens_low_risk)
+
+        explicit = metadata.get("max_tokens")
+        if explicit is not None:
+            try:
+                cap = min(cap, int(explicit))
+            except (TypeError, ValueError):
+                pass
+
+        cap = max(32, cap)
+        return min(cap, int(self.settings.llm_max_request_tokens))
+
+    def _infer_intent(self, *, messages: list[dict[str, str]], metadata: dict[str, Any]) -> str:
+        safety = dict((metadata or {}).get("safety") or {})
+        intent = str(safety.get("intent") or metadata.get("intent") or "").strip()
+        if intent:
+            return intent
+        text = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
+        return SafetyGate().check(text).intent
+
     def _build_high_risk_chain(self) -> list[Any]:
         chain: list[Any] = []
         from app.services import _build_provider
@@ -321,7 +387,7 @@ class LLMRouter:
         if cost <= 0 and status == "ok":
             provider = (response.provider or "").lower()
             model = (response.model or "").lower()
-            price = PRICE_PER_1K.get((provider, model))
+            price = self._price_per_1k(provider=provider, model=model)
             if price:
                 in_cost, out_cost = price
                 cost = (float(response.input_tokens or 0) / 1000.0) * in_cost + (float(response.output_tokens or 0) / 1000.0) * out_cost
@@ -340,6 +406,16 @@ class LLMRouter:
             latency_ms=latency_ms,
             status=status,
         )
+
+    @staticmethod
+    def _price_per_1k(*, provider: str, model: str) -> tuple[float, float] | None:
+        exact = PRICE_PER_1K.get((provider, model))
+        if exact:
+            return exact
+        for (pfx_provider, model_prefix), rates in PRICE_PREFIX_PER_1K.items():
+            if provider == pfx_provider and model.startswith(model_prefix):
+                return rates
+        return None
 
     @staticmethod
     def _log_structured(

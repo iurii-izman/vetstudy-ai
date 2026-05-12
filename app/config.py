@@ -54,10 +54,16 @@ class Settings(BaseSettings):
     llm_circuit_breaker_failures: int = 2
     llm_circuit_breaker_open_seconds: float = 20.0
     llm_max_request_tokens: int = 4096
+    llm_max_output_tokens_default: int = 700
+    llm_max_output_tokens_low_risk: int = 520
+    llm_max_output_tokens_high_risk: int = 340
+    llm_max_output_tokens_dosage: int = 260
+    llm_max_output_tokens_toxicology: int = 260
+    llm_max_output_tokens_emergency: int = 220
     llm_low_risk_provider: str = "gemini"
     llm_low_risk_model: str = "gemini-2.5-flash-lite"
     llm_high_risk_provider: str = "openai"
-    llm_high_risk_model: str = "gpt-5.4"
+    llm_high_risk_model: str = "gpt-5.4-mini"
     llm_cost_estimate_input_per_1k: float = 0.0005
     llm_cost_estimate_output_per_1k: float = 0.0015
 
@@ -71,6 +77,8 @@ class Settings(BaseSettings):
 
     daily_cost_limit_usd: float = Field(default=2.0, validation_alias=AliasChoices("DAILY_COST_LIMIT_USD", "DAILY_COST_CAP_USD"))
     monthly_cost_limit_usd: float = Field(default=25.0, validation_alias=AliasChoices("MONTHLY_COST_LIMIT_USD", "MONTHLY_COST_CAP_USD"))
+    weekly_cost_budget_usd: float = Field(default=0.0, validation_alias=AliasChoices("WEEKLY_COST_BUDGET_USD"))
+    weekly_cost_alarm_ratio: float = Field(default=0.8, validation_alias=AliasChoices("WEEKLY_COST_ALARM_RATIO"))
     global_daily_cost_limit_usd: float = Field(default=2.0, validation_alias=AliasChoices("GLOBAL_DAILY_COST_LIMIT_USD"))
     global_monthly_cost_limit_usd: float = Field(default=25.0, validation_alias=AliasChoices("GLOBAL_MONTHLY_COST_LIMIT_USD"))
     user_id_hash_salt: str = ""

@@ -170,6 +170,8 @@ class GeminiProvider:
             "systemInstruction": {"parts": [{"text": system_prompt or ""}]},
             "contents": contents,
         }
+        if metadata and metadata.get("max_tokens"):
+            payload["generationConfig"] = {"maxOutputTokens": int(metadata["max_tokens"])}
         try:
             resp = await self._get_client().post(
                 f"{self.base_url}/models/{self.model}:generateContent",

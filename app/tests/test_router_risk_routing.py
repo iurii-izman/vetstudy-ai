@@ -38,7 +38,7 @@ def _settings():
     s.llm_low_risk_provider = "gemini"
     s.llm_low_risk_model = "gemini-2.5-flash-lite"
     s.llm_high_risk_provider = "openai"
-    s.llm_high_risk_model = "gpt-5.4"
+    s.llm_high_risk_model = "gpt-5.4-mini"
     return s
 
 
@@ -69,7 +69,7 @@ def test_high_risk_intent_routes_to_paid_model(monkeypatch):
             metadata={"safety": {"intent": "dosage_request", "risk_tags": []}},
         )
     )
-    assert text == "openai:gpt-5.4"
+    assert text == "openai:gpt-5.4-mini"
 
 
 def test_low_risk_routes_to_free_model(monkeypatch):
@@ -108,7 +108,7 @@ def test_high_risk_fallback_uses_gemini_pro_then_default_fallback(monkeypatch):
     settings.gemini_api_key = "configured"
 
     def _build_provider(name: str, model: str, _settings):
-        if name == "openai" and model == "gpt-5.4":
+        if name == "openai" and model == "gpt-5.4-mini":
             return StubProvider(name, model, should_fail=True)
         if name == "gemini" and model == "gemini-2.5-pro":
             return StubProvider(name, model)
