@@ -23,6 +23,8 @@ class QuizItem:
 
 @dataclass
 class DailyLearningRoute:
+    mode: str
+    plan_minutes: int
     mini_case: str
     drug_risk: str
     due_count: int
@@ -43,9 +45,30 @@ class WeeklyRecap:
     weak_topics: list[str]
 
 
+@dataclass
+class WeeklyPlanDay:
+    day_index: int
+    focus: str
+    mode: str
+    mini_case: str
+    review_target: int
+    quiz_target: int
+    planned_commands: list[str]
+
+
+@dataclass
+class WeeklyLearningPlan:
+    days: list[WeeklyPlanDay]
+    weak_topics: list[str]
+    overdue_count: int
+    streak_days: int
+    relaunch_days: int
+
+
 class LearningService:
     CARD_SCHEMA_HINT = '{"cards":[{"front":"...","back":"...","card_type":"fact|cloze|case_next_step|risk_check|owner_explain","difficulty":"easy|medium|hard","needs_manual_check":false,"tags":["..."]}]}'
     QUIZ_SCHEMA_HINT = '{"quiz":[{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"correct_answer":"A|B|C|D","explanation":"...","difficulty":"easy|medium|hard","tags":["..."]}]}'
+    DAY_MODES = {"light": {"minutes": 15, "review_n": 2}, "standard": {"minutes": 25, "review_n": 3}, "intensive": {"minutes": 40, "review_n": 5}}
 
     @staticmethod
     def _clip(text: str, min_len: int, max_len: int) -> str:
@@ -172,13 +195,67 @@ class LearningService:
             )
         return quiz
 
-    def build_daily_route(self, *, db, user_id, topic_id=None, now: datetime | None = None) -> DailyLearningRoute:
+    def _normalize_day_mode(self, requested_mode: str | None) -> str:
+        mode = str(requested_mode or "standard").strip().lower()
+        if mode not in self.DAY_MODES:
+            return "standard"
+        return mode
+
+    def _daily_activity_count(self, *, db, user_id, day_start: datetime, day_end: datetime) -> int:
+        return int(
+            db.execute(
+                select(func.count(ProductEvent.id)).where(
+                    ProductEvent.user_id == user_id,
+                    ProductEvent.created_at >= day_start,
+                    ProductEvent.created_at < day_end,
+                    ProductEvent.event_name.in_(
+                        [
+                            "learning_route_opened",
+                            "weekly_plan_opened",
+                            "case_started",
+                            "review_answered",
+                            "quiz_opened",
+                            "cards_created",
+                        ]
+                    ),
+                )
+            ).scalar_one()
+            or 0
+        )
+
+    def compute_streak(self, *, db, user_id, now: datetime | None = None) -> tuple[int, int]:
         now = now or datetime.now(UTC)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        streak = 0
+        relaunch_days = 0
+        gap_open = True
+        for offset in range(0, 30):
+            start = day_start - timedelta(days=offset)
+            end = start + timedelta(days=1)
+            activity = self._daily_activity_count(db=db, user_id=user_id, day_start=start, day_end=end)
+            if offset == 0 and activity == 0:
+                continue
+            if activity > 0 and gap_open:
+                streak += 1
+                continue
+            if activity == 0 and streak > 0:
+                gap_open = False
+                continue
+            if activity > 0 and not gap_open:
+                relaunch_days = offset
+                break
+        return streak, relaunch_days
+
+    def build_daily_route(self, *, db, user_id, topic_id=None, now: datetime | None = None, mode: str = "standard") -> DailyLearningRoute:
+        now = now or datetime.now(UTC)
+        mode = self._normalize_day_mode(mode)
+        mode_cfg = self.DAY_MODES[mode]
         since_7d = now - timedelta(days=7)
         due_cards = FlashcardRepo(db).list_due(user_id=user_id, topic_id=topic_id, now=now, limit=30)
         all_cards = FlashcardRepo(db).by_user(user_id, limit=200)
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
+        overdue_count = int(sum(1 for card in due_cards if getattr(card, "due_at", None) and getattr(card, "due_at") < start_of_day))
         reviewed_today = int(
             db.execute(
                 select(func.count(ReviewEvent.id)).where(
@@ -230,6 +307,22 @@ class LearningService:
             .limit(3)
         ).all()
         weak_topics = [str(title) for title, _ in weak_topic_rows if title]
+        recent_error_rows = db.execute(
+            select(ProductEvent.properties).where(
+                ProductEvent.user_id == user_id,
+                ProductEvent.event_name == "error_event",
+                ProductEvent.created_at >= since_7d,
+            )
+        ).all()
+        recent_errors = [str((row[0] or {}).get("kind", "unknown")) for row in recent_error_rows][-3:]
+        case_diff_rows = db.execute(
+            select(ProductEvent.properties).where(
+                ProductEvent.user_id == user_id,
+                ProductEvent.event_name == "case_feedback",
+                ProductEvent.created_at >= since_7d,
+            )
+        ).all()
+        recent_case_difficulty = [str((row[0] or {}).get("difficulty", "unknown")) for row in case_diff_rows][-5:]
         topic_title = None
         if topic_id is not None:
             topic_row = db.execute(select(Topic.title).where(Topic.id == topic_id)).one_or_none()
@@ -238,6 +331,8 @@ class LearningService:
         used_fallback = not bool(due_cards or all_cards)
         if used_fallback:
             return DailyLearningRoute(
+                mode=mode,
+                plan_minutes=mode_cfg["minutes"],
                 mini_case="Кошка, 3 года: рвота и диарея 24ч, аппетит снижен. Назови triage-красные флаги, 3 дифференциала и минимум диагностики.",
                 drug_risk="Препарат/риск: НПВС у кошек. Проверь вид, дегидратацию, почечные риски, сочетание со стероидами; при неполных данных — manual check.",
                 due_count=0,
@@ -253,15 +348,16 @@ class LearningService:
                 negative_feedback_count=negative_feedback_count,
             )
 
-        review_cards = [card.front for card in due_cards[:3]]
-        if len(review_cards) < 3:
+        review_target = int(mode_cfg["review_n"])
+        review_cards = [card.front for card in due_cards[:review_target]]
+        if len(review_cards) < review_target:
             seen = set(review_cards)
             for card in all_cards:
                 if card.front in seen:
                     continue
                 review_cards.append(card.front)
                 seen.add(card.front)
-                if len(review_cards) >= 3:
+                if len(review_cards) >= review_target:
                     break
 
         seed_card = due_cards[0] if due_cards else all_cards[0]
@@ -287,17 +383,49 @@ class LearningService:
             reflection_question = "Какой риск в твоих последних ответах уже отмечен как слабое место и как ты его проверишь сегодня?"
         elif zero_result_searches > 0:
             reflection_question = "Как переформулировать вопрос так, чтобы поиск дал контекст вместо нулевого результата?"
+        if overdue_count >= 5:
+            reflection_question = "Как сократить backlog карточек: какие 2 карточки повторишь первыми, чтобы снять перегруз?"
 
         return DailyLearningRoute(
+            mode=mode,
+            plan_minutes=mode_cfg["minutes"],
             mini_case=mini_case,
             drug_risk=drug_risk,
             due_count=len(due_cards),
-            review_cards=review_cards[:3],
+            review_cards=review_cards[:review_target],
             reflection_question=reflection_question,
             used_fallback=False,
-            weak_topics=weak_topics,
+            weak_topics=weak_topics + [f"recent_error:{x}" for x in recent_errors] + [f"case_difficulty:{x}" for x in recent_case_difficulty],
             zero_result_searches=zero_result_searches,
             negative_feedback_count=negative_feedback_count,
+        )
+
+    def build_week_plan(self, *, db, user_id, topic_id=None, now: datetime | None = None) -> WeeklyLearningPlan:
+        now = now or datetime.now(UTC)
+        route = self.build_daily_route(db=db, user_id=user_id, topic_id=topic_id, now=now, mode="standard")
+        streak_days, relaunch_days = self.compute_streak(db=db, user_id=user_id, now=now)
+        modes = ["light", "standard", "intensive", "standard", "light", "intensive", "standard"]
+        days: list[WeeklyPlanDay] = []
+        for day_idx in range(1, 8):
+            mode = modes[day_idx - 1]
+            focus = route.weak_topics[(day_idx - 1) % max(1, len(route.weak_topics))] if route.weak_topics else "triage_basics"
+            days.append(
+                WeeklyPlanDay(
+                    day_index=day_idx,
+                    focus=focus,
+                    mode=mode,
+                    mini_case=f"День {day_idx}: {route.mini_case}",
+                    review_target=2 if mode == "light" else 4 if mode == "standard" else 6,
+                    quiz_target=1 if mode == "light" else 2,
+                    planned_commands=["/today", "/case", "/review", "/quiz"],
+                )
+            )
+        return WeeklyLearningPlan(
+            days=days,
+            weak_topics=route.weak_topics,
+            overdue_count=route.due_count,
+            streak_days=streak_days,
+            relaunch_days=relaunch_days,
         )
 
     def build_weekly_recap(self, *, db, user_id, now: datetime | None = None) -> WeeklyRecap:

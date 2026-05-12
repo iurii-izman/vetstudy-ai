@@ -285,6 +285,8 @@ async def test_today_command_builds_route_and_tracks_event(monkeypatch):
         handlers.LearningService,
         "build_daily_route",
         lambda self, **kwargs: SimpleNamespace(
+            mode="standard",
+            plan_minutes=25,
             mini_case="Собака с диареей: дифференциалы?",
             drug_risk="НПВС у кошек: check kidney and hydration.",
             due_count=4,
@@ -296,13 +298,15 @@ async def test_today_command_builds_route_and_tracks_event(monkeypatch):
             negative_feedback_count=1,
         ),
     )
+    monkeypatch.setattr(handlers.LearningService, "compute_streak", lambda self, **kwargs: (3, 0))
     message = FakeMessage(user_id=1, text="/today")
     await handlers.cmd_today(message)
     assert message.answers
     text = message.answers[0]["text"]
-    assert "Маршрут на 15-30 минут" in text
+    assert "Маршрут на 25 минут (standard)" in text
     assert "карточки к сроку 4" in text.lower()
     assert "Zero-result поисков" in text
+    assert "Streak: 3 дн." in text
     assert tracked and tracked[0]["event_name"] == "learning_route_opened"
 
 
@@ -333,6 +337,38 @@ async def test_weekly_command_outputs_recap(monkeypatch):
     assert "Weekly recap" in message.answers[0]["text"]
     assert "Кардио" in message.answers[0]["text"]
     assert tracked and tracked[0]["event_name"] == "weekly_recap_opened"
+
+
+@pytest.mark.asyncio
+async def test_plan_week_command_outputs_plan(monkeypatch):
+    tracked = []
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={}),
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1"),
+        ),
+    )
+    monkeypatch.setattr(
+        handlers.LearningService,
+        "build_week_plan",
+        lambda self, **kwargs: SimpleNamespace(
+            days=[SimpleNamespace(day_index=1, mode="light", focus="Терапия", mini_case="Кейс", review_target=2, quiz_target=1, planned_commands=["/case", "/review", "/quiz"])],
+            weak_topics=["Терапия"],
+            overdue_count=3,
+            streak_days=4,
+            relaunch_days=0,
+        ),
+    )
+    monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)))
+    message = FakeMessage(user_id=1, text="/plan_week")
+    await handlers.cmd_plan_week(message)
+    assert "Персональный план на 7 дней" in message.answers[0]["text"]
+    assert "/case x1" in message.answers[0]["text"]
+    assert tracked and tracked[0]["event_name"] == "weekly_plan_opened"
 
 
 @pytest.mark.asyncio

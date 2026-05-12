@@ -202,3 +202,36 @@ class ProductAnalyticsService:
             "unresolved_negative_feedback": unresolved_negative,
             "high_risk_query_count": high_risk_queries,
         }
+
+    def learning_adherence(self, *, days: int = 30) -> dict[str, Any]:
+        since = datetime.now(UTC) - timedelta(days=days)
+        tracked = self.db.execute(
+            select(ProductEvent.event_name, ProductEvent.properties, ProductEvent.created_at).where(ProductEvent.created_at >= since)
+        ).all()
+        opened_today = 0
+        completed_today = 0
+        skipped_today = 0
+        reopened_after_drop = 0
+        milestone_hits = 0
+        for event_name, props, _ in tracked:
+            payload = props or {}
+            if event_name == "learning_route_opened" and int(payload.get("due_count", 0) or 0) > 0 and int(payload.get("streak_days", 0) or 0) == 0:
+                skipped_today += 1
+                opened_today += 1
+            elif event_name == "learning_route_opened":
+                opened_today += 1
+            elif event_name == "review_answered":
+                completed_today += 1
+            elif event_name == "learning_relaunched":
+                reopened_after_drop += 1
+            elif event_name == "streak_milestone_reached":
+                milestone_hits += 1
+        adherence_rate = (completed_today / opened_today) if opened_today else 0.0
+        return {
+            "learning_route_opened": opened_today,
+            "learning_completed_actions": completed_today,
+            "learning_skipped_signals": skipped_today,
+            "reopened_after_dropout": reopened_after_drop,
+            "streak_milestones": milestone_hits,
+            "adherence_rate": adherence_rate,
+        }

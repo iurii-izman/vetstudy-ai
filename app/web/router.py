@@ -709,6 +709,7 @@ def admin_analytics_summary(
         "dau_like": service.dau_like(days=min(max(days, 1), 60)),
         "content_gap_report": service.content_gap_report(days=days),
         "retrieval_quality": service.retrieval_quality(days=days),
+        "learning_adherence": service.learning_adherence(days=days),
         "behavior": service.behavior_summary(days=days),
     }
 

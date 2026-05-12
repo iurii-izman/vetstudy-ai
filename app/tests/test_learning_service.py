@@ -119,11 +119,14 @@ def test_build_daily_route_fallback_when_no_cards(monkeypatch):
             _FakeResult(row=[]),
             _FakeResult(scalar=0),
             _FakeResult(row=[]),
+            _FakeResult(row=[]),
+            _FakeResult(row=[]),
             _FakeResult(row=("Терапия",)),
         ]
     )
     route = service.build_daily_route(db=db, user_id="u-1", topic_id="t-1", now=datetime(2026, 5, 3, 10, 0, 0))
     assert route.used_fallback is True
+    assert route.mode == "standard"
     assert route.due_count == 0
     assert len(route.review_cards) == 3
     assert "НПВС у кошек" in route.drug_risk
@@ -157,17 +160,48 @@ def test_build_daily_route_from_existing_cards(monkeypatch):
             _FakeResult(row=[({"results": 0},)]),
             _FakeResult(scalar=1),
             _FakeResult(row=[("Терапия", 2)]),
+            _FakeResult(row=[({"kind": "provider"},)]),
+            _FakeResult(row=[({"difficulty": "basic"},)]),
             _FakeResult(row=("Терапия",)),
         ]
     )
-    route = service.build_daily_route(db=db, user_id="u-1", topic_id="t-1", now=datetime(2026, 5, 3, 10, 0, 0))
+    route = service.build_daily_route(db=db, user_id="u-1", topic_id="t-1", now=datetime(2026, 5, 3, 10, 0, 0), mode="intensive")
     assert route.used_fallback is False
+    assert route.mode == "intensive"
     assert route.due_count == 2
-    assert len(route.review_cards) == 3
+    assert len(route.review_cards) == 3  # capped by available cards
     assert "Мини-кейс" in route.mini_case
     assert route.zero_result_searches == 1
     assert route.negative_feedback_count == 1
     assert "Терапия" in route.weak_topics
+    assert "recent_error:provider" in route.weak_topics
+
+
+def test_build_week_plan(monkeypatch):
+    service = LearningService()
+
+    monkeypatch.setattr(
+        LearningService,
+        "build_daily_route",
+        lambda self, **kwargs: SimpleNamespace(
+            mode="standard",
+            plan_minutes=25,
+            mini_case="Собака с рвотой",
+            drug_risk="НПВС",
+            due_count=4,
+            review_cards=["Q1", "Q2", "Q3"],
+            reflection_question="R",
+            used_fallback=False,
+            weak_topics=["Терапия"],
+            zero_result_searches=1,
+            negative_feedback_count=0,
+        ),
+    )
+    monkeypatch.setattr(LearningService, "compute_streak", lambda self, **kwargs: (5, 2))
+    plan = service.build_week_plan(db=object(), user_id="u-1", topic_id="t-1", now=datetime(2026, 5, 3, 10, 0, 0))
+    assert len(plan.days) == 7
+    assert plan.streak_days == 5
+    assert "/case" in plan.days[0].planned_commands
 
 
 def test_build_weekly_recap_counts(monkeypatch):

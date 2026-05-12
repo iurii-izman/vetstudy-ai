@@ -23,6 +23,9 @@ def test_product_analytics_summary_methods():
         service.track(user_id=user.id, event_name="activation_first_question")
         service.track(user_id=user.id, event_name="onboarding_step_completed", properties={"step": "bind_topic"})
         service.track(user_id=user.id, event_name="weekly_recap_opened")
+        service.track(user_id=user.id, event_name="learning_route_opened", properties={"due_count": 3, "streak_days": 0})
+        service.track(user_id=user.id, event_name="review_answered", properties={"action": "good"})
+        service.track(user_id=user.id, event_name="streak_milestone_reached", properties={"days": 3})
         db.add(ProductEvent(user_id=user.id, event_name="search_performed", properties={"results": 0, "topic_title": "T"}, created_at=datetime.now(UTC) - timedelta(days=1)))
         db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 0, "memory_hits": 0, "document_hits": 0}))
         db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 3, "memory_hits": 2, "document_hits": 1}))
@@ -37,8 +40,12 @@ def test_product_analytics_summary_methods():
         assert retrieval["retrieval_hit_rate"] == 0.5
         assert retrieval["avg_retrieved_chunks"] == 1.5
         summary = service.behavior_summary(days=30)
+        adherence = service.learning_adherence(days=30)
         assert "events" in summary
         assert summary["events"].get("onboarding_step_completed", 0) == 1
         assert summary["events"].get("weekly_recap_opened", 0) == 1
+        assert adherence["learning_route_opened"] == 1
+        assert adherence["learning_completed_actions"] == 1
+        assert adherence["streak_milestones"] == 1
     finally:
         db.close()

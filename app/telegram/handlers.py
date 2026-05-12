@@ -299,6 +299,30 @@ def _safety_error_text() -> str:
     return "Для безопасного ответа не хватает данных. Следующий шаг: укажите вид, вес, возраст, симптомы и точный препарат/ситуацию."
 
 
+def _next_step_keyboard(context: str) -> InlineKeyboardMarkup:
+    if context == "quota":
+        rows = [
+            [InlineKeyboardButton(text="🔁 Повторить /review", switch_inline_query_current_chat="/review")],
+            [InlineKeyboardButton(text="📅 Открыть /today", switch_inline_query_current_chat="/today light")],
+        ]
+    elif context == "provider":
+        rows = [
+            [InlineKeyboardButton(text="📊 Проверить /status", switch_inline_query_current_chat="/status")],
+            [InlineKeyboardButton(text="📅 Открыть /today", switch_inline_query_current_chat="/today standard")],
+        ]
+    else:
+        rows = [
+            [InlineKeyboardButton(text="🧾 Добавить клин.данные", switch_inline_query_current_chat="вид= вес= возраст= симптомы= препарат=")],
+            [InlineKeyboardButton(text="🩺 Учебный кейс /case", switch_inline_query_current_chat="/case basic")],
+        ]
+    if context == "learning":
+        rows = [
+            [InlineKeyboardButton(text="🩺 Перейти в /case", switch_inline_query_current_chat="/case basic")],
+            [InlineKeyboardButton(text="🔁 Перейти в /review", switch_inline_query_current_chat="/review")],
+        ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _onboarding_state(user) -> dict:
     settings = dict(user.settings or {})
     onboarding = dict(settings.get("onboarding") or {})
@@ -389,7 +413,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             await _send_typing(message)
             quota = QuotaGuard(get_settings()).check_user_and_global(db, user)
             if not quota.allowed:
-                await message.answer(quota.message or "Лимит исчерпан.")
+                await message.answer(quota.message or _quota_error_text(), reply_markup=_next_step_keyboard("quota"))
                 return
             chat_db = ChatDBService(db)
             preferred_mode = (user.settings or {}).get("mode", "practical")
@@ -419,7 +443,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                     event_name="safety_clarification_required",
                     properties={"risk_tags": getattr(safety, "risk_tags", [])},
                 )
-                await message.answer(warn)
+                await message.answer(warn, reply_markup=_next_step_keyboard("safety"))
                 return
             memory = MemoryService(MemoryRepo(db), topic_repo=TopicRepo(db), embedder=llm_router, chunk_repo=DocumentChunkRepo(db))
             search_results = await memory.search(db=db, user_id=user.id, query=text, current_topic_id=topic.id, top_k=5, cross_topic=True)
@@ -542,12 +566,12 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 details={"topic_id": str(topic.id), "message_id": message.message_id},
             )
             logger.exception("provider_runtime_error", extra={"event": "telegram_pipeline_error", "error_category": "provider_error"})
-            await message.answer(_provider_error_text())
+            await message.answer(_provider_error_text(), reply_markup=_next_step_keyboard("provider"))
             return
         except Exception as exc:
             mapped = map_pipeline_error(exc)
             if mapped.category == "quota_error":
-                await message.answer(_quota_error_text())
+                await message.answer(_quota_error_text(), reply_markup=_next_step_keyboard("quota"))
                 return
             ErrorEventRepo(db).add(
                 user_id=user.id,
@@ -557,7 +581,10 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             )
             ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "unexpected"})
             logger.exception("pipeline_failed", extra={"event": "telegram_pipeline_error", "error_category": "telegram_error"})
-            await message.answer("Временная ошибка обработки. Следующий шаг: повторите запрос или используйте /today для продолжения обучения.")
+            await message.answer(
+                "Временная ошибка обработки. Следующий шаг: повторите запрос или используйте /today для продолжения обучения.",
+                reply_markup=_next_step_keyboard("provider"),
+            )
             return
         finally:
             db.close()
@@ -630,7 +657,7 @@ async def cmd_help(message: Message):
     await message.answer(
         "Онбординг:\n/start\n/status\n/topics\n/create_default_topics\n/bind_topic <slug_or_name>\n\n"
         "Сессия:\n/new\n/mode\n/evidence\n/save\n/search\n/summary\n/profile\n\n"
-        "Обучение:\n/today\n/cards\n/review\n/quiz\n/export\n\n"
+        "Обучение:\n/today [light|standard|intensive]\n/plan_week\n/cards\n/review\n/quiz\n/export\n\n"
         "Отчет:\n/weekly\n\n"
         "Клинические кейсы:\n/case — выбрать виртуальный кейс\n/case_answer — отправить анализ на оценку\n\n"
         "Система:\n/docs\n/help",
@@ -1155,7 +1182,7 @@ async def cmd_review(message: Message):
 
 
 @router.message(Command("today"))
-async def cmd_today(message: Message):
+async def cmd_today(message: Message, command: CommandObject | None = None):
     if await _deny_if_not_allowed(message):
         return
     db = new_session()
@@ -1166,23 +1193,32 @@ async def cmd_today(message: Message):
         if not topic or not topic.subject_id:
             await message.answer(_topic_required_text(message.message_thread_id))
             return
-        route = LearningService().build_daily_route(db=db, user_id=user.id, topic_id=topic.id)
+        requested_mode = ((command.args or "").strip().lower() if command else "") or "standard"
+        route = LearningService().build_daily_route(db=db, user_id=user.id, topic_id=topic.id, mode=requested_mode)
+        streak_days, relaunch_days = LearningService().compute_streak(db=db, user_id=user.id)
         analytics = ProductAnalyticsService(db)
         analytics.track(
             user_id=user.id,
             topic_id=topic.id,
             event_name="learning_route_opened",
             properties={
+                "mode": route.mode,
+                "plan_minutes": route.plan_minutes,
                 "used_fallback": route.used_fallback,
                 "due_count": route.due_count,
                 "weak_topics_count": len(route.weak_topics),
                 "zero_result_searches": route.zero_result_searches,
                 "negative_feedback_count": route.negative_feedback_count,
+                "streak_days": streak_days,
             },
         )
+        if streak_days in {3, 7, 14, 30}:
+            analytics.track(user_id=user.id, topic_id=topic.id, event_name="streak_milestone_reached", properties={"days": streak_days})
+        if relaunch_days > 0:
+            analytics.track(user_id=user.id, topic_id=topic.id, event_name="learning_relaunched", properties={"after_days": relaunch_days})
         _complete_onboarding_step(user=user, step="today_route", analytics=analytics, topic_id=topic.id)
         lines = [
-            "Маршрут на 15-30 минут:",
+            f"Маршрут на {route.plan_minutes} минут ({route.mode}):",
             f"1) Мини-кейс: {route.mini_case}",
             f"2) Препарат/риск: {route.drug_risk}",
             f"3) Повтор: карточки к сроку {route.due_count}",
@@ -1196,8 +1232,52 @@ async def cmd_today(message: Message):
             lines.append(f"Zero-result поисков за 7 дней: {route.zero_result_searches}")
         if route.negative_feedback_count > 0:
             lines.append(f"Негативный feedback за 7 дней: {route.negative_feedback_count}")
+        lines.append(f"Streak: {streak_days} дн.")
         lines.append(f"5) Reflection: {route.reflection_question}")
-        await message.answer("\n".join(lines))
+        if relaunch_days > 0:
+            lines.append(f"Возврат после паузы: {relaunch_days} дн. Отличный рестарт, продолжай в комфортном темпе.")
+        await message.answer("\n".join(lines), reply_markup=_next_step_keyboard("learning"))
+    finally:
+        db.close()
+
+
+@router.message(Command("plan_week"))
+async def cmd_plan_week(message: Message):
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        chat_db = ChatDBService(db)
+        user = chat_db.ensure_user(message.from_user.id, message.from_user.full_name if message.from_user else None)
+        topic = chat_db.get_topic_for_chat_thread(message.chat.id, message.message_thread_id)
+        if not topic or not topic.subject_id:
+            await message.answer(_topic_required_text(message.message_thread_id))
+            return
+        plan = LearningService().build_week_plan(db=db, user_id=user.id, topic_id=topic.id)
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            topic_id=topic.id,
+            event_name="weekly_plan_opened",
+            properties={
+                "days": len(plan.days),
+                "overdue_count": plan.overdue_count,
+                "streak_days": plan.streak_days,
+                "weak_topics_count": len(plan.weak_topics),
+            },
+        )
+        lines = [
+            "Персональный план на 7 дней:",
+            f"Streak: {plan.streak_days} дн., overdue карточек: {plan.overdue_count}",
+        ]
+        for day in plan.days:
+            lines.append(
+                f"День {day.day_index} [{day.mode}] {day.focus}: {day.mini_case} | /case x1, /review x{day.review_target}, /quiz x{day.quiz_target}"
+            )
+        await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🩺 Начать /case", switch_inline_query_current_chat="/case basic")],
+            [InlineKeyboardButton(text="🔁 Начать /review", switch_inline_query_current_chat="/review")],
+            [InlineKeyboardButton(text="🧪 Начать /quiz", switch_inline_query_current_chat="/quiz 3")],
+        ]))
     finally:
         db.close()
 
