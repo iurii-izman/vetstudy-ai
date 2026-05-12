@@ -205,6 +205,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_notebooklm_pac
 - `.env`, local data, backups, caches, build output, and audit artifacts are ignored.
 - GitHub secret scanning and push protection should stay enabled.
 - Web sessions are HMAC-signed, time-limited, and bound to the authenticated Telegram ID.
+- Web login/admin endpoints use Redis-backed rate limiting with safe in-process fallback when Redis is unavailable.
+- Privacy deletion endpoints remove database records and raw uploaded files referenced by document metadata paths.
 - Prefer `WEB_OWNER_PASSWORD_HASH` for deployed environments.
 - See `SECURITY.md` for reporting and rotation guidance.
 

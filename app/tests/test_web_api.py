@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -138,8 +139,14 @@ def test_invalid_x_user_telegram_id_rejected():
 
 def test_owner_token_can_use_web_without_user_header():
     client, _, _ = make_client()
-    res = client.get('/api/web/stats', headers={'Authorization': f'Bearer {get_settings().web_owner_token}'})
-    assert res.status_code == 200
+    settings = get_settings()
+    old_owner_id = settings.web_owner_telegram_id
+    try:
+        settings.web_owner_telegram_id = 999
+        res = client.get('/api/web/stats', headers={'Authorization': f'Bearer {settings.web_owner_token}'})
+        assert res.status_code == 200
+    finally:
+        settings.web_owner_telegram_id = old_owner_id
 
 
 def test_user_isolation_topics_notes_messages_flashcards_search():
@@ -263,7 +270,9 @@ def test_web_login_supports_password_hash_and_refresh():
     client, _, _ = make_client()
     settings = get_settings()
     old_hash = settings.web_owner_password_hash
+    old_owner_id = settings.web_owner_telegram_id
     try:
+        settings.web_owner_telegram_id = 999
         settings.web_owner_password_hash = hash_password("secure-pass-1")
         auth = client.post("/api/web/auth/session", json={"password": "secure-pass-1"})
         assert auth.status_code == 200
@@ -274,6 +283,7 @@ def test_web_login_supports_password_hash_and_refresh():
         assert refreshed.json()["access_token"] != auth.json()["access_token"]
     finally:
         settings.web_owner_password_hash = old_hash
+        settings.web_owner_telegram_id = old_owner_id
 
 
 def test_web_login_rate_limit_and_admin_alert_endpoints():
@@ -282,7 +292,9 @@ def test_web_login_rate_limit_and_admin_alert_endpoints():
     settings = get_settings()
     old_count = settings.web_login_rate_limit_count
     old_window = settings.web_login_rate_limit_window_seconds
+    old_owner_id = settings.web_owner_telegram_id
     try:
+        settings.web_owner_telegram_id = 999
         settings.web_login_rate_limit_count = 1
         settings.web_login_rate_limit_window_seconds = 60
         ok = client.post("/api/web/auth/login", json={"password": settings.web_owner_password})
@@ -292,6 +304,7 @@ def test_web_login_rate_limit_and_admin_alert_endpoints():
     finally:
         settings.web_login_rate_limit_count = old_count
         settings.web_login_rate_limit_window_seconds = old_window
+        settings.web_owner_telegram_id = old_owner_id
 
     metrics = client.get("/api/web/admin/metrics/providers", headers=_owner_headers())
     assert metrics.status_code == 200
@@ -318,3 +331,94 @@ def test_profile_endpoints_and_admin_analytics_summary():
     retrieval = client.get("/api/web/admin/analytics/retrieval-quality", headers=_owner_headers())
     assert retrieval.status_code == 200
     assert "retrieval_hit_rate" in retrieval.json()
+
+
+def test_privacy_topic_delete_removes_raw_upload_file(tmp_path):
+    client, topic1_id, _ = make_client()
+    settings = get_settings()
+    upload_base = tmp_path / "uploads"
+    upload_base.mkdir(parents=True, exist_ok=True)
+    old_media_storage = settings.media_storage_path
+    settings.media_storage_path = str(upload_base)
+    upload = upload_base / "upload-topic.pdf"
+    upload.write_text("sensitive", encoding="utf-8")
+    try:
+        with client as c:
+            db = next(app.dependency_overrides[get_db]())
+            try:
+                user = db.query(User).filter(User.telegram_user_id == 1001).one()
+                topic = db.query(Topic).filter(Topic.id == topic1_id).one()
+                doc = Document(user_id=user.id, topic_id=topic.id, filename="upload-topic.pdf", size_bytes=9, status="indexed", job_id="job-topic-raw", metadata_={"stored_path": str(upload)})
+                db.add(doc)
+                db.commit()
+            finally:
+                db.close()
+            deleted = c.delete(f"/api/web/privacy/topic/{topic1_id}", headers=_user_headers(1001))
+            assert deleted.status_code == 200
+        assert not upload.exists()
+    finally:
+        settings.media_storage_path = old_media_storage
+
+
+def test_privacy_account_delete_is_idempotent_when_file_missing(tmp_path):
+    client, _, _ = make_client()
+    settings = get_settings()
+    upload_base = tmp_path / "uploads"
+    upload_base.mkdir(parents=True, exist_ok=True)
+    old_media_storage = settings.media_storage_path
+    settings.media_storage_path = str(upload_base)
+    missing = upload_base / "missing-account.pdf"
+    try:
+        with client as c:
+            db = next(app.dependency_overrides[get_db]())
+            try:
+                user = db.query(User).filter(User.telegram_user_id == 1002).one()
+                doc = Document(user_id=user.id, topic_id=None, filename="missing-account.pdf", size_bytes=0, status="indexed", job_id="job-account-raw", metadata_={"stored_path": str(missing)})
+                db.add(doc)
+                db.commit()
+            finally:
+                db.close()
+            deleted = c.delete("/api/web/privacy/account", headers=_user_headers(1002))
+            assert deleted.status_code == 200
+    finally:
+        settings.media_storage_path = old_media_storage
+
+
+def test_redis_rate_limiter_falls_back_to_memory_on_redis_error(monkeypatch):
+    client, _, _ = make_client()
+    settings = get_settings()
+    _rate_limiter.reset()
+    old_count = settings.web_login_rate_limit_count
+    old_window = settings.web_login_rate_limit_window_seconds
+    old_owner_id = settings.web_owner_telegram_id
+    try:
+        settings.web_owner_telegram_id = 999
+        settings.web_login_rate_limit_count = 1
+        settings.web_login_rate_limit_window_seconds = 60
+        monkeypatch.setattr(_rate_limiter, "_redis", SimpleNamespace(pipeline=lambda: (_ for _ in ()).throw(RuntimeError("redis down"))))
+        ok = client.post("/api/web/auth/login", json={"password": settings.web_owner_password})
+        limited = client.post("/api/web/auth/login", json={"password": settings.web_owner_password})
+        assert ok.status_code == 200
+        assert limited.status_code == 429
+    finally:
+        settings.web_login_rate_limit_count = old_count
+        settings.web_login_rate_limit_window_seconds = old_window
+        settings.web_owner_telegram_id = old_owner_id
+
+
+def test_admin_endpoints_are_rate_limited():
+    client, _, _ = make_client()
+    settings = get_settings()
+    old_count = settings.web_admin_rate_limit_count
+    old_window = settings.web_admin_rate_limit_window_seconds
+    try:
+        settings.web_admin_rate_limit_count = 1
+        settings.web_admin_rate_limit_window_seconds = 60
+        _rate_limiter.reset()
+        first = client.get("/api/web/admin/errors", headers=_owner_headers())
+        second = client.get("/api/web/admin/errors", headers=_owner_headers())
+        assert first.status_code == 200
+        assert second.status_code == 429
+    finally:
+        settings.web_admin_rate_limit_count = old_count
+        settings.web_admin_rate_limit_window_seconds = old_window

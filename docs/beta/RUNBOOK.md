@@ -13,10 +13,13 @@
 - Keep media worker as a dedicated process/service; do not rely on bot polling process to start indexing workers.
 - Verify `GET /health` and `GET /ready`.
 - Verify `/api/web/auth/session` login and `/api/web/auth/refresh` rotation.
+- Verify `WEB_OWNER_TELEGRAM_ID` is configured; owner login/session issuance now rejects missing owner id.
 - Verify `/api/web/admin/metrics/providers` and `/api/web/admin/alerts/unanswered`.
 - Verify `/api/web/admin/analytics/retrieval-quality` for retrieval hit/empty rates.
 - Verify router logs include `route_decision` and `reason` fields (JSON logs, `docker compose logs bot`).
 - Verify breaker transitions in logs (`event=breaker_state`, states `open|half_open|closed`) during provider instability.
+- Verify web login/admin rate limits with Redis available; on Redis outage, limiter should gracefully fall back to in-process limiting (reduced cross-instance consistency).
+- Verify privacy delete flows remove `documents` rows and raw upload files referenced in document metadata paths.
 
 ## 3. Backup/restore drill
 - Backup: `./scripts/backup_pg.sh`.

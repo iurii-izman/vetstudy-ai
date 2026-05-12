@@ -1820,7 +1820,7 @@ async def on_image_or_document(message: Message):
             filename=stored.original_name,
             size_bytes=stored.size_bytes,
             job_id=job_id,
-            metadata={"source": "telegram_upload"},
+            metadata={"source": "telegram_upload", "stored_path": str(stored.path)},
         )
         docs = list((user.settings or {}).get("documents", []))
         docs.append({"job_id": job_id, "filename": stored.original_name, "size_bytes": stored.size_bytes, "status": "queued", "topic_id": str(topic.id)})

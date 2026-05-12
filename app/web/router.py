@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
 from uuid import UUID
 
@@ -17,10 +18,11 @@ from app.db.repositories import ErrorEventRepo, FeedbackEventRepo, ModelCallRepo
 from app.learning.service import LearningService
 from app.db.session import get_db
 from app.quotas import QuotaGuard
-from app.web.security import InMemoryRateLimiter, issue_session_token, validate_session_token, verify_password
+from app.web.security import InMemoryRateLimiter, RedisBackedRateLimiter, issue_session_token, validate_session_token, verify_password
 
 router = APIRouter(prefix="/api/web", tags=["web"])
-_rate_limiter = InMemoryRateLimiter()
+_fallback_rate_limiter = InMemoryRateLimiter()
+_rate_limiter = RedisBackedRateLimiter(redis_url=get_settings().redis_url, fallback=_fallback_rate_limiter)
 SESSION_COOKIE = "vetstudy_session"
 
 
@@ -83,13 +85,14 @@ def _check_token(request: Request, authorization: str | None = Header(default=No
 
 
 def _fallback_owner_telegram_id(settings) -> int:
-    if settings.web_owner_telegram_id:
-        return settings.web_owner_telegram_id
-    for raw in settings.allowed_telegram_user_ids.split(","):
-        raw = raw.strip()
-        if raw:
-            return int(raw)
-    return 0
+    return int(settings.web_owner_telegram_id or 0)
+
+
+def _owner_telegram_id_or_401(settings) -> int:
+    owner_tg_id = _fallback_owner_telegram_id(settings)
+    if owner_tg_id <= 0:
+        raise HTTPException(status_code=401, detail="WEB_OWNER_TELEGRAM_ID is required for owner auth")
+    return owner_tg_id
 
 
 def _get_current_user(
@@ -109,8 +112,13 @@ def _get_current_user(
         token_tg_user, token_role, _ = validate_session_token(token, secret=settings.web_session_secret)
         if x_user_telegram_id is not None and x_user_telegram_id != token_tg_user:
             raise HTTPException(status_code=403, detail="Session token user mismatch")
-    owner_fallback = x_user_telegram_id is None
-    telegram_user_id = x_user_telegram_id if is_static_owner_token and x_user_telegram_id is not None else (token_tg_user or _fallback_owner_telegram_id(settings))
+    owner_fallback = is_static_owner_token and x_user_telegram_id is None
+    if owner_fallback:
+        telegram_user_id = _owner_telegram_id_or_401(settings)
+    else:
+        telegram_user_id = x_user_telegram_id if is_static_owner_token and x_user_telegram_id is not None else token_tg_user
+    if not telegram_user_id:
+        raise HTTPException(status_code=401, detail="Unable to resolve authenticated user")
     role = token_role or ("owner" if owner_fallback else "user")
     user = UserRepo(db).get_or_create(
         telegram_user_id=telegram_user_id,
@@ -177,7 +185,7 @@ def web_login(payload: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid password")
     session = issue_session_token(
         secret=settings.web_session_secret,
-        telegram_user_id=_fallback_owner_telegram_id(settings),
+        telegram_user_id=_owner_telegram_id_or_401(settings),
         role="owner",
         ttl_seconds=settings.web_session_ttl_seconds,
     )
@@ -185,8 +193,48 @@ def web_login(payload: LoginRequest):
         "access_token": session.token,
         "expires_at": session.expires_at.isoformat(),
         "token_type": "bearer",
-        "telegram_user_id": _fallback_owner_telegram_id(settings),
+        "telegram_user_id": _owner_telegram_id_or_401(settings),
     }
+
+
+def _allow_admin_rate_limit(user: User) -> bool:
+    settings = get_settings()
+    return _rate_limiter.allow(
+        key=f"web-admin:{user.telegram_user_id}",
+        limit=settings.web_admin_rate_limit_count,
+        window_seconds=settings.web_admin_rate_limit_window_seconds,
+    )
+
+
+def _document_storage_paths(documents: list[Document]) -> list[str]:
+    candidate_keys = ("path", "stored_path", "file_path", "upload_path")
+    out: list[str] = []
+    for doc in documents:
+        metadata = dict(doc.metadata_ or {})
+        for key in candidate_keys:
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                out.append(value.strip())
+                break
+    return out
+
+
+def _cleanup_document_files(paths: list[str]) -> None:
+    settings = get_settings()
+    base = Path(settings.media_storage_path).resolve()
+    seen: set[Path] = set()
+    for raw_path in paths:
+        file_path = Path(raw_path)
+        resolved = file_path.resolve() if file_path.is_absolute() else (base / file_path).resolve()
+        if base not in resolved.parents:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            os.remove(resolved)
+        except FileNotFoundError:
+            continue
 
 
 @router.post("/auth/session")
@@ -504,6 +552,8 @@ def delete_topic(topic_id: UUID, user: User = Depends(_get_current_user), db: Se
     topic = db.execute(_accessible_topics_query(user).where(Topic.id == topic_id)).scalar_one_or_none()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
+    documents = db.execute(select(Document).where(Document.user_id == user.id, Document.topic_id == topic_id)).scalars().all()
+    document_paths = _document_storage_paths(documents)
     session_ids = [x.id for x in db.execute(select(ChatSession).where(ChatSession.user_id == user.id, ChatSession.topic_id == topic_id)).scalars().all()]
     if session_ids:
         db.execute(Message.__table__.delete().where(Message.session_id.in_(session_ids)))
@@ -515,6 +565,7 @@ def delete_topic(topic_id: UUID, user: User = Depends(_get_current_user), db: Se
     if topic.user_id == user.id:
         db.delete(topic)
     db.commit()
+    _cleanup_document_files(document_paths)
     return {"ok": True}
 
 
@@ -522,6 +573,8 @@ def delete_topic(topic_id: UUID, user: User = Depends(_get_current_user), db: Se
 def delete_account(user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
     if user.role == "owner":
         raise HTTPException(status_code=400, detail="Owner account cannot be deleted via API")
+    documents = db.execute(select(Document).where(Document.user_id == user.id)).scalars().all()
+    document_paths = _document_storage_paths(documents)
     topic_ids = [x.id for x in db.execute(select(Topic).where(Topic.user_id == user.id)).scalars().all()]
     session_ids = [x.id for x in db.execute(select(ChatSession).where(ChatSession.user_id == user.id)).scalars().all()]
     if session_ids:
@@ -536,13 +589,13 @@ def delete_account(user: User = Depends(_get_current_user), db: Session = Depend
     db.execute(ModelCall.__table__.delete().where(ModelCall.user_id == user.id))
     db.delete(user)
     db.commit()
+    _cleanup_document_files(document_paths)
     return {"ok": True}
 
 
 @router.get("/admin/users")
 def admin_users(_: str = Depends(_check_token), user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
-    settings = get_settings()
-    if not _rate_limiter.allow(key=f"web-admin:{user.telegram_user_id}", limit=settings.web_admin_rate_limit_count, window_seconds=settings.web_admin_rate_limit_window_seconds):
+    if not _allow_admin_rate_limit(user):
         raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     rows = UserRepo(db).list_all()
@@ -551,8 +604,7 @@ def admin_users(_: str = Depends(_check_token), user: User = Depends(_get_curren
 
 @router.get("/admin/usage")
 def admin_usage(_: str = Depends(_check_token), user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
-    settings = get_settings()
-    if not _rate_limiter.allow(key=f"web-admin:{user.telegram_user_id}", limit=settings.web_admin_rate_limit_count, window_seconds=settings.web_admin_rate_limit_window_seconds):
+    if not _allow_admin_rate_limit(user):
         raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     calls, in_tokens, out_tokens, cost = ModelCallRepo(db).usage_all()
@@ -561,8 +613,7 @@ def admin_usage(_: str = Depends(_check_token), user: User = Depends(_get_curren
 
 @router.get("/admin/costs")
 def admin_costs(_: str = Depends(_check_token), user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
-    settings = get_settings()
-    if not _rate_limiter.allow(key=f"web-admin:{user.telegram_user_id}", limit=settings.web_admin_rate_limit_count, window_seconds=settings.web_admin_rate_limit_window_seconds):
+    if not _allow_admin_rate_limit(user):
         raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     rows = db.execute(
@@ -580,6 +631,8 @@ def admin_costs(_: str = Depends(_check_token), user: User = Depends(_get_curren
 
 @router.get("/admin/errors")
 def admin_errors(_: str = Depends(_check_token), user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     rows = ErrorEventRepo(db).list_recent(limit=200)
     return [{"id": x.id, "user_id": x.user_id, "scope": x.scope, "category": x.category, "details": x.details, "created_at": x.created_at} for x in rows]
@@ -587,6 +640,8 @@ def admin_errors(_: str = Depends(_check_token), user: User = Depends(_get_curre
 
 @router.get("/admin/metrics/providers")
 def admin_provider_metrics(_: str = Depends(_check_token), user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     rows = db.execute(
         select(
@@ -616,6 +671,8 @@ def admin_unanswered_alerts(
     user: User = Depends(_get_current_user),
     db: Session = Depends(get_db),
 ):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     cutoff = datetime.now(UTC)
     sessions = db.execute(select(ChatSession)).scalars().all()
@@ -654,6 +711,8 @@ def admin_unanswered_alerts(
 
 @router.get("/admin/feedback")
 def admin_feedback(status: str | None = None, _: str = Depends(_check_token), user: User = Depends(_get_current_user), db: Session = Depends(get_db)):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     rows = FeedbackEventRepo(db).list_recent(limit=200, status=status)
     return [{"id": x.id, "user_id": x.user_id, "topic_id": x.topic_id, "message_id": x.message_id, "feedback_type": x.feedback_type, "status": x.status, "model": x.model, "details": x.details, "created_at": x.created_at} for x in rows]
@@ -666,6 +725,8 @@ def admin_analytics_summary(
     user: User = Depends(_get_current_user),
     db: Session = Depends(get_db),
 ):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     service = ProductAnalyticsService(db)
     return {
@@ -686,6 +747,8 @@ def admin_retrieval_quality(
     user: User = Depends(_get_current_user),
     db: Session = Depends(get_db),
 ):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     return ProductAnalyticsService(db).retrieval_quality(days=days)
 
@@ -698,6 +761,8 @@ def admin_feedback_update(
     user: User = Depends(_get_current_user),
     db: Session = Depends(get_db),
 ):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     feedback = db.execute(select(FeedbackEvent).where(FeedbackEvent.id == feedback_id)).scalar_one_or_none()
     if not feedback:
@@ -725,6 +790,8 @@ def topics_graph(user: User = Depends(_get_current_user), db: Session = Depends(
 
 @router.get("/admin/model-settings")
 def admin_model_settings(_: str = Depends(_check_token), user: User = Depends(_get_current_user)):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     settings = get_settings()
     return {
@@ -738,6 +805,8 @@ def admin_model_settings(_: str = Depends(_check_token), user: User = Depends(_g
 
 @router.get("/admin/evidence/source-coverage")
 def admin_evidence_source_coverage(_: str = Depends(_check_token), user: User = Depends(_get_current_user)):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     settings = get_settings()
     path = Path(settings.evidence_sources_path)
@@ -767,6 +836,8 @@ def admin_evidence_needs_check(
     user: User = Depends(_get_current_user),
     db: Session = Depends(get_db),
 ):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_admin(user)
     rows = db.execute(
         select(Message)
@@ -801,6 +872,8 @@ def admin_set_role(
     user: User = Depends(_get_current_user),
     db: Session = Depends(get_db),
 ):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
     _require_owner(user)
     if payload.role not in {"owner", "admin", "user"}:
         raise HTTPException(status_code=400, detail="Unsupported role")

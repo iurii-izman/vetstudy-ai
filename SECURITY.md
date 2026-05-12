@@ -19,4 +19,5 @@ Report privately to the repository owner first, then create a sanitized GitHub i
 ## Data Handling
 
 VetStudy AI is an educational beta assistant. Do not submit client personal data, owner identifying data, or sensitive real-patient records.
-Exports and deletion endpoints cover application data; raw uploaded files and infrastructure backups must also be handled in deployment runbooks.
+Privacy deletion endpoints now remove database records and referenced raw uploaded files (by `documents.metadata.stored_path`/path fields) in an idempotent way.
+Exports cover application data only; infrastructure backups still require separate operational deletion/retention handling in runbooks.

@@ -9,6 +9,9 @@ import hmac
 import secrets
 import threading
 import time
+from typing import Protocol
+
+from redis import Redis
 
 
 def hash_password(password: str, *, salt: str | None = None, iterations: int = 310000) -> str:
@@ -79,3 +82,41 @@ class InMemoryRateLimiter:
     def reset(self) -> None:
         with self._lock:
             self._buckets = {}
+
+
+class RateLimiter(Protocol):
+    def allow(self, *, key: str, limit: int, window_seconds: int) -> bool: ...
+
+    def reset(self) -> None: ...
+
+
+class RedisBackedRateLimiter:
+    def __init__(self, *, redis_url: str, fallback: InMemoryRateLimiter):
+        self._fallback = fallback
+        self._redis = Redis.from_url(redis_url, encoding="utf-8", decode_responses=True) if redis_url else None
+
+    def allow(self, *, key: str, limit: int, window_seconds: int) -> bool:
+        if limit <= 0:
+            return False
+        if self._redis is None:
+            return self._fallback.allow(key=key, limit=limit, window_seconds=window_seconds)
+        now = int(time.time())
+        bucket_key = f"web:rate:{key}"
+        try:
+            with self._redis.pipeline() as pipe:
+                pipe.zremrangebyscore(bucket_key, 0, now - window_seconds)
+                pipe.zcard(bucket_key)
+                _, count = pipe.execute()
+            if int(count or 0) >= limit:
+                return False
+            member = f"{now}-{secrets.token_hex(6)}"
+            with self._redis.pipeline() as pipe:
+                pipe.zadd(bucket_key, {member: now})
+                pipe.expire(bucket_key, max(window_seconds, 1))
+                pipe.execute()
+            return True
+        except Exception:
+            return self._fallback.allow(key=key, limit=limit, window_seconds=window_seconds)
+
+    def reset(self) -> None:
+        self._fallback.reset()

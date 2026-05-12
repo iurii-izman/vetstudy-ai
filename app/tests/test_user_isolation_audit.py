@@ -36,3 +36,22 @@ def test_user_cannot_access_admin_usage():
     client = _make_client()
     res = client.get('/api/web/admin/usage', headers={'Authorization': f'Bearer {get_settings().web_owner_token}', 'X-User-Telegram-Id': '1001'})
     assert res.status_code == 403
+
+
+def test_session_cookie_user_mismatch_is_rejected():
+    client = _make_client()
+    settings = get_settings()
+    old_owner_id = settings.web_owner_telegram_id
+    try:
+        settings.web_owner_telegram_id = 999
+        auth = client.post('/api/web/auth/session', json={'password': settings.web_owner_password})
+        assert auth.status_code == 200
+        token = auth.cookies.get('vetstudy_session')
+        res = client.get(
+            '/api/web/stats',
+            cookies={'vetstudy_session': token},
+            headers={'X-User-Telegram-Id': '1001'},
+        )
+        assert res.status_code == 403
+    finally:
+        settings.web_owner_telegram_id = old_owner_id
