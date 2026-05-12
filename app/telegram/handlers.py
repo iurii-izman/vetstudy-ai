@@ -48,6 +48,8 @@ from app.telegram.ux import quota_error_text as _quota_error_text
 from app.telegram.ux import safety_error_text as _safety_error_text
 from app.telegram.ux import topic_required_text as _topic_required_text
 from app.telegram.ux import why_payload_for_meta as _why_payload_for_meta
+from app.telegram.nudges import ProactiveNudgeEngine
+from app.telegram.trust import compact_trust_trace
 
 router = Router()
 logger = logging.getLogger("app.telegram.handlers")
@@ -323,6 +325,19 @@ def _build_document_learning_nudge(*, filename: str, chunks: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _multimodal_actionability(*, source_type: str, source_name: str, key_text: str, user_settings: dict | None = None) -> str:
+    learning = dict((user_settings or {}).get("learning") or {})
+    route = dict(learning.get("last_route") or {})
+    plan = f"difficulty={route.get('difficulty_band', 'medium')}, progression={route.get('progression_mode', 'controlled_progression')}"
+    return (
+        "Structured summary:\n"
+        f"- source: {source_type} ({source_name})\n"
+        f"- key points: {key_text[:180]}\n"
+        f"- personal next-step plan: {plan}\n"
+        "Quick actions: /today light | /review | /case basic"
+    )
+
+
 async def _send_typing(message: Message) -> None:
     sender = getattr(getattr(message, "bot", None), "send_chat_action", None)
     if not sender:
@@ -473,8 +488,18 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                     "needs_manual_check": evidence_resp.needs_manual_check,
                     "manual_check_reasons": evidence_resp.manual_check_reasons,
                     "next_questions": evidence_resp.next_questions,
+                    "source_class": evidence_resp.source_class,
+                    "trust_level": evidence_resp.trust_level,
                 }
             followup_questions = _minimal_next_questions(safety=safety, evidence_payload=evidence_payload)
+            trace_line = compact_trust_trace(
+                source=(evidence_payload or {}).get("source_class"),
+                trust_level=(evidence_payload or {}).get("trust_level"),
+                verification_status=(evidence_payload or {}).get("verification_status"),
+                needs_manual_check=bool((evidence_payload or {}).get("needs_manual_check")),
+                manual_check_reasons=list((evidence_payload or {}).get("manual_check_reasons") or []),
+                missing_data=followup_questions,
+            )
             rendered_answer = _apply_response_density(rendered_answer, profile["response_density"])
             assistant_msg = chat_db.save_assistant_message(
                 session.id,
@@ -491,6 +516,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                         "needs_manual_check": bool((evidence_payload or {}).get("needs_manual_check")),
                         "manual_check_reasons": list((evidence_payload or {}).get("manual_check_reasons", []) or []),
                         "missing_data": followup_questions,
+                        "trust_trace_compact": trace_line,
                     },
                 },
             )
@@ -985,6 +1011,8 @@ async def cmd_why(message: Message):
         if missing_data:
             lines.append("- каких данных не хватило:")
             lines.extend([f"  • {item}" for item in missing_data[:3]])
+        if trace.get("trust_trace_compact"):
+            lines.append(f"- trust trace: {trace.get('trust_trace_compact')}")
         learning_ctx = dict(((user.settings or {}).get("learning") or {}))
         route_ctx = dict(learning_ctx.get("last_route") or {})
         if route_ctx:
@@ -1330,6 +1358,17 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
             )
         if relaunch_days >= 3:
             analytics.track(user_id=user.id, topic_id=topic.id, event_name="return_after_dropout_nudge", properties={"dropout_days": relaunch_days})
+        overload = bool(route.due_count >= 6 or route.negative_feedback_count >= 2)
+        nudges = ProactiveNudgeEngine().choose(
+            db=db,
+            user_id=user.id,
+            dropout_days=relaunch_days,
+            overload=overload,
+            high_risk_blocks=route.high_risk_block_count,
+        )
+        for item in nudges:
+            analytics.track(user_id=user.id, topic_id=topic.id, event_name="proactive_nudge_sent", properties={"key": item.key, "score": item.score})
+            analytics.track(user_id=user.id, topic_id=topic.id, event_name=f"proactive_nudge_sent:{item.key}", properties={"score": item.score})
         _complete_onboarding_step(user=user, step="today_route", analytics=analytics, topic_id=topic.id)
         if route.due_count >= 2 and route.high_risk_block_count == 0:
             _set_journey_state(user=user, state="habit", reason="stable_daily_route", analytics=analytics, topic_id=topic.id)
@@ -1363,6 +1402,10 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
             lines.append("Мягкий сценарий возврата: начни с /today light, затем закрой 2 карточки через /review.")
         if route.high_risk_block_count >= 3:
             lines.append("Много high-risk блокировок: переключаемся на безопасный тренировочный кейс /case basic.")
+        if nudges:
+            lines.append("Proactive nudges:")
+            for item in nudges:
+                lines.append(f"- {item.text}")
         await message.answer("\n".join(lines), reply_markup=_next_step_keyboard("learning"))
     finally:
         db.close()
@@ -2133,13 +2176,7 @@ async def on_voice(message: Message):
         await message.answer("Не удалось распознать аудио: провайдер transcription не настроен или временно недоступен.")
         return
     await message.answer(f"Транскрипт: {transcript}")
-    await message.answer(
-        "Structured summary:\n"
-        f"- source: voice ({stored.original_name})\n"
-        f"- key point: {transcript[:180]}\n"
-        "- next action: уточни клинический контекст или перейди к тренировке\n"
-        "Actions: /cards | /quiz | /save"
-    )
+    await message.answer(_multimodal_actionability(source_type="voice", source_name=stored.original_name, key_text=transcript, user_settings=user.settings))
     db = new_session()
     try:
         ProductAnalyticsService(db).track(
@@ -2199,11 +2236,12 @@ async def on_image_or_document(message: Message):
             parts.append("Невозможно обработать изображение: OCR/Vision провайдеры отключены или недоступны.")
         else:
             parts.append(
-                "Structured summary:\n"
-                f"- source: image ({stored.original_name})\n"
-                f"- extracted: {(ocr_text or vision_text)[:180]}\n"
-                "- next action: проверь контекст и выбери учебный формат\n"
-                "Actions: /cards | /quiz | /save"
+                _multimodal_actionability(
+                    source_type="image",
+                    source_name=stored.original_name,
+                    key_text=(ocr_text or vision_text),
+                    user_settings=user.settings,
+                )
             )
         await message.answer("\n\n".join(parts))
         if ocr_text or vision_text:
@@ -2288,3 +2326,4 @@ async def on_image_or_document(message: Message):
         return
 
     await message.answer("Документ принят. Индексация поставлена в очередь.")
+    await message.answer(_multimodal_actionability(source_type="document", source_name=stored.original_name, key_text="Документ будет разбит на chunks и связан с текущей темой.", user_settings=user.settings))

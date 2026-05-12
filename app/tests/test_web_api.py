@@ -60,6 +60,8 @@ def make_client():
                 "status": "needs_manual_check",
                 "verification_status": "needs_manual_check",
                 "trust_indicators": ["src:official | trust:high | verify:needs_manual_check"],
+                "source_class": "official",
+                "trust_level": "high",
                 "needs_manual_check": True,
                 "manual_check_reasons": ["Need exact product concentration."],
                 "next_questions": ["Species and weight?"],
@@ -277,6 +279,7 @@ def test_admin_evidence_endpoints():
     assert trace.status_code == 200
     assert trace.json()
     assert trace.json()[0]["risk_intent"] == "dosage_request"
+    assert "trust_trace_compact" in trace.json()[0]
 
 
 def test_search_facets_and_topic_graph():

@@ -40,6 +40,8 @@ class EvidenceResponse:
     needs_manual_check: bool
     manual_check_reasons: list[str]
     next_questions: list[str]
+    source_class: str
+    trust_level: str
 
 
 class EvidenceService:
@@ -83,6 +85,8 @@ class EvidenceService:
                     "Какой точный препарат/действующее вещество?",
                     "Вид, вес, возраст и ключевые симптомы пациента?",
                 ],
+                source_class="mixed",
+                trust_level="low",
             )
 
         evidence_bullets: list[str] = []
@@ -166,6 +170,8 @@ class EvidenceService:
             needs_manual_check=needs_manual,
             manual_check_reasons=manual_check_reasons,
             next_questions=next_questions,
+            source_class=(source_classes[0] if source_classes else "mixed"),
+            trust_level=self._trust_bucket(max(trust_levels or [0])),
         )
 
     def preferred_sources(self, *, region: str, species_focus: str) -> list[str]:

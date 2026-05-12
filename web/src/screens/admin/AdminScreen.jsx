@@ -52,6 +52,7 @@ export function AdminScreen({ feedback, analyticsSummary, costBudgetAlert, stats
                 <p><strong>tags:</strong> {(item.risk_tags || []).join(', ') || 'none'}</p>
                 <p><strong>trust:</strong> {(item.trust_indicators || []).join(' · ') || 'n/a'}</p>
                 <p><strong>verify:</strong> {item.verification_status || 'unknown'} | <strong>manual:</strong> {item.needs_manual_check ? 'yes' : 'no'}</p>
+                <p><strong>trace:</strong> {item.trust_trace_compact || 'n/a'}</p>
               </article>
             ))}
           </div>

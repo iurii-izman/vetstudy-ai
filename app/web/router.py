@@ -38,6 +38,7 @@ from app.web.auth import (
     require_admin as _require_admin,
     require_owner as _require_owner,
 )
+from app.telegram.trust import compact_trust_trace
 
 router = APIRouter(prefix="/api/web", tags=["web"])
 
@@ -861,6 +862,14 @@ def admin_trust_safety_trace(
                 "needs_manual_check": bool(evidence.get("needs_manual_check")),
                 "manual_check_reasons": list(why_trace.get("manual_check_reasons") or evidence.get("manual_check_reasons") or []),
                 "missing_data": list(why_trace.get("missing_data") or evidence.get("next_questions") or []),
+                "trust_trace_compact": compact_trust_trace(
+                    source=evidence.get("source_class"),
+                    trust_level=evidence.get("trust_level"),
+                    verification_status=evidence.get("verification_status") or evidence.get("status"),
+                    needs_manual_check=bool(evidence.get("needs_manual_check")),
+                    manual_check_reasons=list(why_trace.get("manual_check_reasons") or evidence.get("manual_check_reasons") or []),
+                    missing_data=list(why_trace.get("missing_data") or evidence.get("next_questions") or []),
+                ),
                 "preview": row.content[:280],
             }
         )

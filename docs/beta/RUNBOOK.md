@@ -7,6 +7,7 @@
 - `alembic upgrade head` on target DB clone.
 - For web changes: `cd web && npm test && npm run build && npm audit --omit=dev`.
 - For `APP_ENV=prod`, verify embeddings config is complete: non-mock `LLM_EMBEDDINGS_PROVIDER`, non-empty `LLM_EMBEDDINGS_MODEL`, and matching provider API key (preflight fails otherwise).
+- For `APP_ENV=prod`, run `python scripts/preflight_check.py --provider` to smoke-test both generation and embeddings; fail-fast if embeddings return empty vectors.
 
 ## 2. Deploy and verification
 - Apply migrations first, then deploy app and worker.
@@ -16,6 +17,7 @@
 - Verify `/api/web/auth/session` login and `/api/web/auth/refresh` rotation.
 - Verify `WEB_OWNER_TELEGRAM_ID` is configured; owner login/session issuance rejects missing owner id and does not fallback to allowlist entries.
 - Verify `/api/web/admin/metrics/providers` and `/api/web/admin/alerts/unanswered`.
+- Verify nightly safety drift monitor: `python scripts/safety_drift_monitor.py --lookback-hours 24 --limit 500 --min-hits 2`; alerts are written to `error_events` with category `safety_drift_pattern_detected`.
 - Verify `/api/web/admin/analytics/retrieval-quality` for retrieval hit/empty rates.
 - Verify router logs include `route_decision` and `reason` fields (JSON logs, `docker compose logs bot`).
 - Verify breaker transitions in logs (`event=breaker_state`, states `open|half_open|closed`) during provider instability.

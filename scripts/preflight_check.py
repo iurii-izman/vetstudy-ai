@@ -97,6 +97,7 @@ def check_env() -> list[tuple[str, str]]:
             rows.append(_fail(f"APP_ENV=prod missing API key for embeddings provider: {embeddings_provider}"))
         else:
             rows.append(_ok(f"embeddings provider configured for prod: {embeddings_provider}/{settings.llm_embeddings_model}"))
+            rows.append(_ok("preflight guidance: run `python scripts/preflight_check.py --provider` to smoke-test generation and embeddings"))
     else:
         if embeddings_provider == "mock":
             rows.append(_warn("embeddings provider is mock (allowed outside APP_ENV=prod)"))
@@ -196,6 +197,11 @@ async def check_provider() -> tuple[str, str]:
         router = build_llm_router()
         text_out = await router.generate(db, None, "Ответь одним словом: ok", purpose="answer")
         if text_out.strip():
+            settings = get_settings()
+            if settings.app_env == "prod":
+                vectors = await router.embed(db, None, ["preflight embeddings probe"])
+                if not vectors or not vectors[0]:
+                    return _fail("provider smoke failed: embeddings provider returned empty vectors in APP_ENV=prod")
             return _ok("primary/fallback provider generated a response")
         return _warn("provider returned an empty response")
     except Exception as exc:
@@ -221,6 +227,8 @@ async def main() -> int:
     args = parser.parse_args()
 
     rows = check_env()
+    if any(status == "fail" for status, _ in rows):
+        return print_rows(rows)
     if args.db:
         rows.append(check_db())
     if args.schema:
