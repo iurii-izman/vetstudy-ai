@@ -4,7 +4,7 @@
   --panel: #ffffff;
   --panel-strong: #f8fafc;
   --ink: #172033;
-  --muted: #657083;
+  --muted: #4b5568;
   --line: #d9e0ea;
   --line-strong: #b8c3d4;
   --blue: #2563eb;
@@ -44,6 +44,11 @@ button {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.62;
+}
+
+:focus-visible {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 2px;
 }
 
 a {
@@ -320,6 +325,12 @@ dt {
 .main-nav a.active {
   color: var(--ink);
   background: #edf3ff;
+}
+
+.main-nav a:focus-visible,
+.topic-button:focus-visible,
+.segmented-control button:focus-visible {
+  outline: 3px solid #60a5fa;
 }
 
 .status-strip {
@@ -670,6 +681,17 @@ dd {
   background: #dbeafe;
 }
 
+.loading-state {
+  display: grid;
+  gap: 8px;
+}
+
+.loading-state p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .loading-bar::after {
   content: "";
   display: block;
@@ -714,7 +736,7 @@ dd {
   .sidebar {
     position: relative;
     height: auto;
-    max-height: 360px;
+    max-height: 320px;
   }
 
   .content {
@@ -739,5 +761,23 @@ dd {
 
   .icon-action {
     justify-self: start;
+  }
+
+  .main-nav {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 4px;
+  }
+
+  .main-nav a {
+    white-space: nowrap;
+  }
+
+  .cards-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .review-grid .flashcard {
+    border-width: 2px;
   }
 }
