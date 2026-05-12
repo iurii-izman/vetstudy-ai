@@ -235,3 +235,25 @@ class ProductAnalyticsService:
             "streak_milestones": milestone_hits,
             "adherence_rate": adherence_rate,
         }
+
+    def ux_conversion_summary(self, *, days: int = 30) -> dict[str, Any]:
+        since = datetime.now(UTC) - timedelta(days=days)
+        rows = self.db.execute(
+            select(ProductEvent.event_name, ProductEvent.properties).where(ProductEvent.created_at >= since)
+        ).all()
+        by_event: dict[str, int] = {}
+        doc_cards = 0
+        for event_name, props in rows:
+            by_event[event_name] = by_event.get(event_name, 0) + 1
+            payload = props or {}
+            if event_name == "cards_created" and str(payload.get("source", "")).lower() == "document":
+                doc_cards += 1
+        voice_summary_offered = int(by_event.get("voice_summary_offered", 0))
+        voice_summary_generated = int(by_event.get("voice_summary_generated", 0))
+        document_nudges_viewed = int(by_event.get("document_learning_nudge_viewed", 0))
+        return_after_dropout = int(by_event.get("return_after_dropout_nudge", 0))
+        return {
+            "document_to_cards": {"nudges_viewed": document_nudges_viewed, "cards_created_from_document": doc_cards},
+            "voice_to_summary": {"offered": voice_summary_offered, "generated": voice_summary_generated},
+            "return_after_dropout": {"nudges": return_after_dropout, "relaunches": int(by_event.get("learning_relaunched", 0))},
+        }

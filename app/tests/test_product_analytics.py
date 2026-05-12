@@ -26,6 +26,12 @@ def test_product_analytics_summary_methods():
         service.track(user_id=user.id, event_name="learning_route_opened", properties={"due_count": 3, "streak_days": 0})
         service.track(user_id=user.id, event_name="review_answered", properties={"action": "good"})
         service.track(user_id=user.id, event_name="streak_milestone_reached", properties={"days": 3})
+        service.track(user_id=user.id, event_name="document_learning_nudge_viewed", properties={"filename": "doc.txt"})
+        service.track(user_id=user.id, event_name="cards_created", properties={"source": "document", "count": 3})
+        service.track(user_id=user.id, event_name="voice_summary_offered", properties={})
+        service.track(user_id=user.id, event_name="voice_summary_generated", properties={})
+        service.track(user_id=user.id, event_name="return_after_dropout_nudge", properties={"dropout_days": 4})
+        service.track(user_id=user.id, event_name="learning_relaunched", properties={"after_days": 4})
         db.add(ProductEvent(user_id=user.id, event_name="search_performed", properties={"results": 0, "topic_title": "T"}, created_at=datetime.now(UTC) - timedelta(days=1)))
         db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 0, "memory_hits": 0, "document_hits": 0}))
         db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 3, "memory_hits": 2, "document_hits": 1}))
@@ -41,11 +47,15 @@ def test_product_analytics_summary_methods():
         assert retrieval["avg_retrieved_chunks"] == 1.5
         summary = service.behavior_summary(days=30)
         adherence = service.learning_adherence(days=30)
+        conversions = service.ux_conversion_summary(days=30)
         assert "events" in summary
         assert summary["events"].get("onboarding_step_completed", 0) == 1
         assert summary["events"].get("weekly_recap_opened", 0) == 1
         assert adherence["learning_route_opened"] == 1
         assert adherence["learning_completed_actions"] == 1
         assert adherence["streak_milestones"] == 1
+        assert conversions["document_to_cards"]["cards_created_from_document"] == 1
+        assert conversions["voice_to_summary"]["generated"] == 1
+        assert conversions["return_after_dropout"]["nudges"] == 1
     finally:
         db.close()

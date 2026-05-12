@@ -34,6 +34,7 @@ class DailyLearningRoute:
     weak_topics: list[str]
     zero_result_searches: int
     negative_feedback_count: int
+    high_risk_block_count: int
 
 
 @dataclass
@@ -293,6 +294,16 @@ class LearningService:
             ).scalar_one()
             or 0
         )
+        high_risk_block_count = int(
+            db.execute(
+                select(func.count(ProductEvent.id)).where(
+                    ProductEvent.user_id == user_id,
+                    ProductEvent.event_name.in_(["high_risk_query", "safety_clarification_required"]),
+                    ProductEvent.created_at >= since_7d,
+                )
+            ).scalar_one()
+            or 0
+        )
         weak_topic_rows = db.execute(
             select(Topic.title, func.count(ReviewEvent.id))
             .join(ReviewEvent, ReviewEvent.topic_id == Topic.id)
@@ -346,6 +357,7 @@ class LearningService:
                 weak_topics=weak_topics,
                 zero_result_searches=zero_result_searches,
                 negative_feedback_count=negative_feedback_count,
+                high_risk_block_count=high_risk_block_count,
             )
 
         review_target = int(mode_cfg["review_n"])
@@ -398,6 +410,7 @@ class LearningService:
             weak_topics=weak_topics + [f"recent_error:{x}" for x in recent_errors] + [f"case_difficulty:{x}" for x in recent_case_difficulty],
             zero_result_searches=zero_result_searches,
             negative_feedback_count=negative_feedback_count,
+            high_risk_block_count=high_risk_block_count,
         )
 
     def build_week_plan(self, *, db, user_id, topic_id=None, now: datetime | None = None) -> WeeklyLearningPlan:

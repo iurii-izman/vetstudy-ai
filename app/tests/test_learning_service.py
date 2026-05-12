@@ -118,6 +118,7 @@ def test_build_daily_route_fallback_when_no_cards(monkeypatch):
             _FakeResult(scalar=0),
             _FakeResult(row=[]),
             _FakeResult(scalar=0),
+            _FakeResult(scalar=0),
             _FakeResult(row=[]),
             _FakeResult(row=[]),
             _FakeResult(row=[]),
@@ -132,6 +133,7 @@ def test_build_daily_route_fallback_when_no_cards(monkeypatch):
     assert "НПВС у кошек" in route.drug_risk
     assert route.zero_result_searches == 0
     assert route.negative_feedback_count == 0
+    assert route.high_risk_block_count == 0
 
 
 def test_build_daily_route_from_existing_cards(monkeypatch):
@@ -159,6 +161,7 @@ def test_build_daily_route_from_existing_cards(monkeypatch):
             _FakeResult(scalar=2),
             _FakeResult(row=[({"results": 0},)]),
             _FakeResult(scalar=1),
+            _FakeResult(scalar=4),
             _FakeResult(row=[("Терапия", 2)]),
             _FakeResult(row=[({"kind": "provider"},)]),
             _FakeResult(row=[({"difficulty": "basic"},)]),
@@ -173,6 +176,7 @@ def test_build_daily_route_from_existing_cards(monkeypatch):
     assert "Мини-кейс" in route.mini_case
     assert route.zero_result_searches == 1
     assert route.negative_feedback_count == 1
+    assert route.high_risk_block_count == 4
     assert "Терапия" in route.weak_topics
     assert "recent_error:provider" in route.weak_topics
 
@@ -195,6 +199,7 @@ def test_build_week_plan(monkeypatch):
             weak_topics=["Терапия"],
             zero_result_searches=1,
             negative_feedback_count=0,
+            high_risk_block_count=0,
         ),
     )
     monkeypatch.setattr(LearningService, "compute_streak", lambda self, **kwargs: (5, 2))

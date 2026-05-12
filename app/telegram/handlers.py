@@ -38,6 +38,7 @@ logger = logging.getLogger("app.telegram.handlers")
 MODES = {"short", "practical", "deep", "exam", "protocol", "cards", "quiz", "evidence"}
 REGION_VALUES = {"us", "eu", "local", "unspecified"}
 SPECIES_VALUES = {"dog", "cat", "dog_cat"}
+RESPONSE_DENSITY_VALUES = {"quick", "balanced", "deep"}
 ONBOARDING_STEPS = ("bind_topic", "today_route", "first_case")
 CASE_LEVELS = ("basic", "intermediate", "advanced")
 DEFAULT_SUBJECTS = [
@@ -105,6 +106,7 @@ async def _index_document_job(
     db = new_session()
     try:
         doc_repo = DocumentRepo(db)
+        user = UserRepo(db).get_or_create(telegram_user_id, display_name)
         doc = doc_repo.get_by_job_id(job_id or "") if hasattr(db, "execute") else None
         if doc and doc.status in {"indexed", "failed"}:
             return
@@ -113,7 +115,6 @@ async def _index_document_job(
         text = extract_document_text(stored_path, original_name)
         chunks = chunk_text(text)
         if not doc and hasattr(db, "execute"):
-            user = UserRepo(db).get_or_create(telegram_user_id, display_name)
             doc = doc_repo.create_or_get(user_id=user.id, topic_id=topic_id, filename=original_name, size_bytes=stored_path.stat().st_size, job_id=job_id or str(uuid4()))
         mem = MemoryRepo(db)
         chunk_repo = DocumentChunkRepo(db)
@@ -145,6 +146,16 @@ async def _index_document_job(
                 tags=["document", f"doc:{original_name}"],
                 embedding=vectors[i] if i < len(vectors) else None,
             )
+        nudge_text = _build_document_learning_nudge(filename=original_name, chunks=chunks)
+        settings = dict(user.settings or {})
+        settings["last_document_learning_nudge"] = {
+            "job_id": job_id,
+            "filename": original_name,
+            "topic_id": str(topic_id),
+            "text": nudge_text,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        user.settings = settings
         if doc and hasattr(db, "execute"):
             doc_repo.update_status(document=doc, status="indexed", chunks=len(chunks))
         _update_document_status(
@@ -422,7 +433,42 @@ def _user_profile(user) -> dict:
         region = "unspecified"
     if species_focus not in SPECIES_VALUES:
         species_focus = "dog_cat"
-    return {"region": region, "species_focus": species_focus}
+    density = str(profile.get("response_density", "balanced")).lower()
+    if density not in RESPONSE_DENSITY_VALUES:
+        density = "balanced"
+    return {"region": region, "species_focus": species_focus, "response_density": density}
+
+
+def _apply_response_density(answer: str, density: str) -> str:
+    text = (answer or "").strip()
+    if density == "deep":
+        return text
+    limit = 900 if density == "quick" else 2200
+    if len(text) <= limit:
+        return text
+    tail = "\n\n[Сокращено под ваш режим. Для полного разбора: /profile density=deep]"
+    return f"{text[:limit].rstrip()}{tail}"
+
+
+def _build_document_learning_nudge(*, filename: str, chunks: list[str]) -> str:
+    lines = [
+        f"Документ `{filename}` проиндексирован.",
+        "Рекомендация: 3 ключевые карточки + 1 мини-кейс.",
+        "",
+        "Карточки:",
+    ]
+    for idx, chunk in enumerate(chunks[:3], start=1):
+        snippet = " ".join(chunk.split())[:170]
+        lines.append(f"{idx}. Что важно по теме #{idx}? -> {snippet} [chunk:{idx}]")
+    seed = " ".join((chunks[0] if chunks else "").split())[:180] or "Клинический фрагмент из документа."
+    lines.extend(
+        [
+            "",
+            f"Мини-кейс: пациент с похожим профилем из `{filename}`. Разберите triage и первый шаг диагностики. Основа: {seed} [chunk:1]",
+            "Действия: /cards doc | /quiz | /save",
+        ]
+    )
+    return "\n".join(lines)
 
 
 async def _send_typing(message: Message) -> None:
@@ -565,6 +611,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                     "next_questions": evidence_resp.next_questions,
                 }
             followup_questions = _minimal_next_questions(safety=safety, evidence_payload=evidence_payload)
+            rendered_answer = _apply_response_density(rendered_answer, profile["response_density"])
             assistant_msg = chat_db.save_assistant_message(
                 session.id,
                 rendered_answer,
@@ -590,6 +637,14 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 event_name="activation_first_answer",
                 properties={"effective_mode": effective_mode, "high_risk": high_risk},
             )
+            if (metadata or {}).get("source_type") == "voice":
+                analytics.track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    session_id=session.id,
+                    event_name="voice_summary_generated",
+                    properties={"response_density": profile["response_density"]},
+                )
             needs_followup = bool((evidence_payload or {}).get("status") in {"needs_manual_check", "partially_verified"})
             await _send_ai_answer(message, rendered_answer)
             if needs_followup and followup_questions:
@@ -743,7 +798,8 @@ async def cmd_profile(message: Message, command: CommandObject):
                 "Профиль:\n"
                 f"- region: {current['region']}\n"
                 f"- species_focus: {current['species_focus']}\n\n"
-                "Изменить: /profile region=<us|eu|local|unspecified> species=<dog|cat|dog_cat>"
+                f"- response_density: {current['response_density']}\n\n"
+                "Изменить: /profile region=<us|eu|local|unspecified> species=<dog|cat|dog_cat> density=<quick|balanced|deep>"
             )
             return
         updates = dict(current)
@@ -756,12 +812,17 @@ async def cmd_profile(message: Message, command: CommandObject):
                 updates["region"] = value
             if key == "species" and value in SPECIES_VALUES:
                 updates["species_focus"] = value
+            if key == "density" and value in RESPONSE_DENSITY_VALUES:
+                updates["response_density"] = value
         settings = dict(user.settings or {})
         settings["profile"] = updates
         user.settings = settings
         db.commit()
         ProductAnalyticsService(db).track(user_id=user.id, event_name="profile_updated", properties=updates)
-        await message.answer(f"Профиль обновлен: region={updates['region']}, species_focus={updates['species_focus']}")
+        await message.answer(
+            "Профиль обновлен: "
+            f"region={updates['region']}, species_focus={updates['species_focus']}, response_density={updates['response_density']}"
+        )
     finally:
         db.close()
 
@@ -825,6 +886,14 @@ async def cmd_docs(message: Message):
             lines.append(f"- {row.filename} | status={row.status} | size={row.size_bytes} bytes")
         for item in docs[-20:]:
             lines.append(f"- {item.get('filename')} | status={item.get('status')} | size={item.get('size_bytes')} bytes")
+        nudge = (user.settings or {}).get("last_document_learning_nudge") or {}
+        if nudge.get("text"):
+            lines.extend(["", "Proactive learning:", str(nudge.get("text"))])
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                event_name="document_learning_nudge_viewed",
+                properties={"job_id": nudge.get("job_id"), "filename": nudge.get("filename")},
+            )
         await message.answer("\n".join(lines))
     finally:
         db.close()
@@ -1173,6 +1242,15 @@ async def cmd_cards(message: Message, command: CommandObject):
             source_message_id = selected.source_message_id
             tags.extend(selected.tags or [])
             tags.append("search")
+        elif source in {"doc", "document"}:
+            nudge = (user.settings or {}).get("last_document_learning_nudge") or {}
+            text = str(nudge.get("text") or "")
+            tags.extend(["document", "document_recap"])
+            source_message_id = None
+            source = "document"
+            if not text:
+                await message.answer("Нет готового document recap. Сначала дождитесь индексации и откройте /docs.")
+                return
         else:
             if not session:
                 await message.answer("Нет активной сессии.")
@@ -1224,6 +1302,13 @@ async def cmd_cards(message: Message, command: CommandObject):
             event_name="cards_created",
             properties={"count": len(cards), "source": source or "answer"},
         )
+        if source == "document":
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                topic_id=topic.id,
+                event_name="document_to_cards_converted",
+                properties={"count": len(cards)},
+            )
         ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="activation_first_cards")
         preview = "\n\n".join(f"Q: {c.front}\nA: {c.back}" for c in cards[:5])
         await message.answer(f"Сгенерировано карточек: {len(cards)}\n\n{preview}")
@@ -1318,6 +1403,7 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
                 "weak_topics_count": len(route.weak_topics),
                 "zero_result_searches": route.zero_result_searches,
                 "negative_feedback_count": route.negative_feedback_count,
+                "high_risk_block_count": route.high_risk_block_count,
                 "streak_days": streak_days,
             },
         )
@@ -1325,6 +1411,8 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
             analytics.track(user_id=user.id, topic_id=topic.id, event_name="streak_milestone_reached", properties={"days": streak_days})
         if relaunch_days > 0:
             analytics.track(user_id=user.id, topic_id=topic.id, event_name="learning_relaunched", properties={"after_days": relaunch_days})
+        if relaunch_days >= 3:
+            analytics.track(user_id=user.id, topic_id=topic.id, event_name="return_after_dropout_nudge", properties={"dropout_days": relaunch_days})
         _complete_onboarding_step(user=user, step="today_route", analytics=analytics, topic_id=topic.id)
         lines = [
             f"Маршрут на {route.plan_minutes} минут ({route.mode}):",
@@ -1341,10 +1429,16 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
             lines.append(f"Zero-result поисков за 7 дней: {route.zero_result_searches}")
         if route.negative_feedback_count > 0:
             lines.append(f"Негативный feedback за 7 дней: {route.negative_feedback_count}")
+        if route.high_risk_block_count > 0:
+            lines.append(f"High-risk блокировок за 7 дней: {route.high_risk_block_count}")
         lines.append(f"Streak: {streak_days} дн.")
         lines.append(f"5) Reflection: {route.reflection_question}")
         if relaunch_days > 0:
             lines.append(f"Возврат после паузы: {relaunch_days} дн. Отличный рестарт, продолжай в комфортном темпе.")
+        if relaunch_days >= 3:
+            lines.append("Мягкий сценарий возврата: начни с /today light, затем закрой 2 карточки через /review.")
+        if route.high_risk_block_count >= 3:
+            lines.append("Много high-risk блокировок: переключаемся на безопасный тренировочный кейс /case basic.")
         await message.answer("\n".join(lines), reply_markup=_next_step_keyboard("learning"))
     finally:
         db.close()
@@ -2095,6 +2189,23 @@ async def on_voice(message: Message):
         await message.answer("Не удалось распознать аудио: провайдер transcription не настроен или временно недоступен.")
         return
     await message.answer(f"Транскрипт: {transcript}")
+    await message.answer(
+        "Structured summary:\n"
+        f"- source: voice ({stored.original_name})\n"
+        f"- key point: {transcript[:180]}\n"
+        "- next action: уточни клинический контекст или перейди к тренировке\n"
+        "Actions: /cards | /quiz | /save"
+    )
+    db = new_session()
+    try:
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            topic_id=topic.id,
+            event_name="voice_summary_offered",
+            properties={"file_name": stored.original_name},
+        )
+    finally:
+        db.close()
     await _run_text_pipeline(message, user, topic, transcript, metadata={"source_type": "voice", "file_name": stored.original_name})
 
 
@@ -2142,7 +2253,26 @@ async def on_image_or_document(message: Message):
             parts.append(f"Vision: {vision_text[:800]}")
         if not ocr_text and not vision_text:
             parts.append("Невозможно обработать изображение: OCR/Vision провайдеры отключены или недоступны.")
+        else:
+            parts.append(
+                "Structured summary:\n"
+                f"- source: image ({stored.original_name})\n"
+                f"- extracted: {(ocr_text or vision_text)[:180]}\n"
+                "- next action: проверь контекст и выбери учебный формат\n"
+                "Actions: /cards | /quiz | /save"
+            )
         await message.answer("\n\n".join(parts))
+        if ocr_text or vision_text:
+            db = new_session()
+            try:
+                user = UserRepo(db).get_or_create(message.from_user.id, message.from_user.full_name if message.from_user else None)
+                ProductAnalyticsService(db).track(
+                    user_id=user.id,
+                    event_name="voice_or_image_summary_offered",
+                    properties={"source_type": "photo" if is_photo else "image_document"},
+                )
+            finally:
+                db.close()
         return
 
     allowed_ext = {".pdf", ".docx", ".txt", ".md"}

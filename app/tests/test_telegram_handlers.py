@@ -334,6 +334,7 @@ async def test_today_command_builds_route_and_tracks_event(monkeypatch):
             weak_topics=["Терапия"],
             zero_result_searches=1,
             negative_feedback_count=1,
+            high_risk_block_count=4,
         ),
     )
     monkeypatch.setattr(handlers.LearningService, "compute_streak", lambda self, **kwargs: (3, 0))
@@ -344,6 +345,7 @@ async def test_today_command_builds_route_and_tracks_event(monkeypatch):
     assert "Маршрут на 25 минут (standard)" in text
     assert "карточки к сроку 4" in text.lower()
     assert "Zero-result поисков" in text
+    assert "High-risk блокировок" in text
     assert "Streak: 3 дн." in text
     assert tracked and tracked[0]["event_name"] == "learning_route_opened"
 
@@ -416,10 +418,11 @@ async def test_profile_command_updates_settings(monkeypatch):
     monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
     monkeypatch.setattr(handlers, "UserRepo", lambda db: SimpleNamespace(get_or_create=lambda *a, **k: user))
     monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **k: None))
-    message = FakeMessage(user_id=1, text="/profile region=eu species=cat")
-    await handlers.cmd_profile(message, SimpleNamespace(args="region=eu species=cat"))
+    message = FakeMessage(user_id=1, text="/profile region=eu species=cat density=quick")
+    await handlers.cmd_profile(message, SimpleNamespace(args="region=eu species=cat density=quick"))
     assert user.settings["profile"]["region"] == "eu"
     assert user.settings["profile"]["species_focus"] == "cat"
+    assert user.settings["profile"]["response_density"] == "quick"
 
 
 @pytest.mark.asyncio
@@ -432,8 +435,9 @@ async def test_split_long_answer(monkeypatch):
     monkeypatch.setattr(handlers.llm_router, "generate", _generate)
     message = FakeMessage()
     await handlers.on_text(message)
-    assert len(message.answers) > 1
+    assert message.answers
     assert all(len(item["text"]) <= 3900 for item in message.answers)
+    assert "density=deep" in message.answers[-1]["text"]
 
 
 def test_callback_parsing():
@@ -525,6 +529,7 @@ async def test_voice_transcribes_and_answers(monkeypatch, tmp_path):
     message.voice = SimpleNamespace(file_id="1", file_size=12)
     await handlers.on_voice(message)
     assert any("Транскрипт" in a["text"] for a in message.answers)
+    assert any("Structured summary" in a["text"] for a in message.answers)
 
 
 @pytest.mark.asyncio
