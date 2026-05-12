@@ -384,6 +384,33 @@ def test_privacy_account_delete_is_idempotent_when_file_missing(tmp_path):
         settings.media_storage_path = old_media_storage
 
 
+def test_privacy_topic_delete_does_not_remove_outside_storage(tmp_path):
+    client, topic1_id, _ = make_client()
+    settings = get_settings()
+    upload_base = tmp_path / "uploads"
+    upload_base.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.pdf"
+    outside.write_text("outside", encoding="utf-8")
+    old_media_storage = settings.media_storage_path
+    settings.media_storage_path = str(upload_base)
+    try:
+        with client as c:
+            db = next(app.dependency_overrides[get_db]())
+            try:
+                user = db.query(User).filter(User.telegram_user_id == 1001).one()
+                topic = db.query(Topic).filter(Topic.id == topic1_id).one()
+                doc = Document(user_id=user.id, topic_id=topic.id, filename="outside.pdf", size_bytes=7, status="indexed", job_id="job-topic-outside", metadata_={"stored_path": str(outside)})
+                db.add(doc)
+                db.commit()
+            finally:
+                db.close()
+            deleted = c.delete(f"/api/web/privacy/topic/{topic1_id}", headers=_user_headers(1001))
+            assert deleted.status_code == 200
+        assert outside.exists()
+    finally:
+        settings.media_storage_path = old_media_storage
+
+
 def test_redis_rate_limiter_falls_back_to_memory_on_redis_error(monkeypatch):
     client, _, _ = make_client()
     settings = get_settings()

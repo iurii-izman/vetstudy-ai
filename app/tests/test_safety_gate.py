@@ -121,7 +121,9 @@ def test_dosage_reordered_skolko_dat_detected():
     result = gate.check("Сколько амоксициллина дать собаке 12 кг при пиодермии?")
     assert result.intent == "dosage_request"
     assert result.action == "ask_clarifying_questions"
-    assert any("форма" in q.lower() or "концентра" in q.lower() for q in (result.clarifying_questions or []))
+    questions = [q.lower() for q in (result.clarifying_questions or [])]
+    assert any("уточнение формы и концентрации" in q for q in questions)
+    assert any("текущие препараты" in q for q in questions)
 
 
 def test_paracetamol_kot_detects_cat_warning():

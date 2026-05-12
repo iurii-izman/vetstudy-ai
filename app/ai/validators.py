@@ -20,6 +20,10 @@ class PostGenerationValidator:
     )
     _EMERGENCY_PATTERN = re.compile(r"\b(не\s+дыш\w*|без\s+сознания|судорог\w*|коллапс\w*|сильн\w+\s+кровотеч\w*)\b", re.IGNORECASE)
     _TRIAGE_PATTERN = re.compile(r"\b(сроч\w*|неотлож\w*|клиник\w*|ветеринар\w*)\b", re.IGNORECASE)
+    _TRIAGE_MARKER_PATTERN = re.compile(
+        r"\b(триаж\w*|triage|сроч\w*|неотлож\w*|экстр\w*|urgent\w*|urgenta|клиник\w*|ветеринар\w*)\b",
+        re.IGNORECASE,
+    )
     _UNSAFE_HOME_PATTERN = re.compile(r"\b(дайте\s+дома|лечите\s+дома|подождите\s+дома)\b", re.IGNORECASE)
     _TOX_PATTERN = re.compile(
         r"\b(парацетамол|acetaminophen|отрав\w*|токс\w*|шоколад\w*|изюм\w*|ксилит\w*|xylit\w*|лук\w*|чеснок\w*|перметрин\w*)\b",
@@ -41,6 +45,7 @@ class PostGenerationValidator:
     _SOURCE_CHECK_PATTERN = re.compile(r"\b(требует\s+проверки|нужно\s+проверить|проверьте\s+источник)\b", re.IGNORECASE)
     _DIAGNOSIS_CERTAINTY_PATTERN = re.compile(r"\b(точный\s+диагноз|окончательный\s+диагноз|это\s+точно)\b", re.IGNORECASE)
     _EXAM_NEEDED_PATTERN = re.compile(r"\b(очного\s+осмотр|осмотр[ае]\s+ветеринар\w*|нужен\s+осмотр)\b", re.IGNORECASE)
+    _CLINICAL_CONTEXT_PATTERN = re.compile(r"\b(диагноз|клиническ\w*\s+случа\w*|симптом\w*|анамнез\w*|рвот\w*|одышк\w*|судорог\w*)\b", re.IGNORECASE)
 
     def validate(self, *, question: str, answer: str) -> ValidationResult:
         flags: list[str] = []
@@ -58,20 +63,20 @@ class PostGenerationValidator:
                 flags.append("emergency_no_escalation")
             if self._UNSAFE_HOME_PATTERN.search(a):
                 flags.append("emergency_unsafe_home_instruction")
-            if "триаж" not in a and "triage" not in a:
+            if not self._TRIAGE_MARKER_PATTERN.search(a):
                 flags.append("emergency_missing_triage_marker")
         if self._TOX_PATTERN.search(q):
             if "токс" not in a and "отрав" not in a:
                 flags.append("toxicology_no_warning")
             if not self._TRIAGE_PATTERN.search(a):
                 flags.append("toxicology_no_escalation")
-            if "триаж" not in a and "triage" not in a:
+            if not self._TRIAGE_MARKER_PATTERN.search(a):
                 flags.append("toxicology_missing_triage_marker")
         if "взаимодейств" in q and self._INTERACTION_ASSERTIVE_PATTERN.search(a) and not self._INTERACTION_CHECK_PATTERN.search(a):
             flags.append("drug_interaction_overconfident")
         if self._SOURCE_UNCERTAIN_PATTERN.search(q) and not self._SOURCE_CHECK_PATTERN.search(a):
             flags.append("source_uncertainty_not_marked")
-        if self._DIAGNOSIS_CERTAINTY_PATTERN.search(a) and not self._EXAM_NEEDED_PATTERN.search(a):
+        if self._CLINICAL_CONTEXT_PATTERN.search(q) and self._DIAGNOSIS_CERTAINTY_PATTERN.search(a) and not self._EXAM_NEEDED_PATTERN.search(a):
             flags.append("medical_certainty_without_exam")
         if self._HIGH_RISK_PATTERN.search(q) and self._OVERCONFIDENT_PATTERN.search(a) and not self._HEDGE_OR_CHECK_PATTERN.search(a):
             flags.append("high_risk_overconfident_tone")

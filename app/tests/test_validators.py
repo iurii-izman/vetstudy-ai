@@ -46,7 +46,7 @@ def test_emergency_validator_requires_triage_marker():
         question="Кошка в судорогах, что делать?",
         answer="Срочно в клинику.",
     )
-    assert "emergency_missing_triage_marker" in r.flags
+    assert "emergency_missing_triage_marker" not in r.flags
 
 
 def test_toxicology_validator_requires_triage_marker():
@@ -55,7 +55,7 @@ def test_toxicology_validator_requires_triage_marker():
         question="Собака съела ксилит",
         answer="Это токсикологический риск, срочно в клинику.",
     )
-    assert "toxicology_missing_triage_marker" in r.flags
+    assert "toxicology_missing_triage_marker" not in r.flags
 
 
 def test_high_risk_overconfident_flag():

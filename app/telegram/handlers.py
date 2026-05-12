@@ -1,17 +1,14 @@
 import asyncio
-from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
-import hmac
 import logging
 from pathlib import Path
-import time
 from uuid import UUID, uuid4
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup
 from app.config import get_settings
 
 from app.analytics import ProductAnalyticsService
@@ -30,6 +27,9 @@ from app.errors import is_retryable_db_error, map_pipeline_error
 from app.quotas import QuotaGuard
 from sqlalchemy.exc import SQLAlchemyError
 from app.services import llm_router, prompt_manager, safety_gate
+from app.telegram.callbacks import parse_callback_data as _parse_callback_data
+from app.telegram.callbacks import callback_data as _signed_callback_data
+from app.telegram.ui import build_ai_reply_keyboard, build_main_menu_reply_keyboard, build_review_keyboard
 from app.telegram.formatting import TELEGRAM_HTML_PARSE_MODE, format_ai_answer_for_telegram, split_for_telegram, strip_telegram_html
 
 router = Router()
@@ -47,8 +47,6 @@ DEFAULT_SUBJECTS = [
     ("anatomy", "Анатомия", "Фокус на структурной логике, ориентирах и экзаменационных связях."),
     ("general", "Общее", "Общие вопросы, кросс-темы и быстрые уточнения."),
 ]
-CALLBACK_TTL_BUCKETS = 12
-CALLBACK_BUCKET_SECONDS = 300
 
 
 def _update_document_status(
@@ -202,12 +200,6 @@ async def _index_document_job(
         db.close()
 
 
-@dataclass(frozen=True)
-class ActionCallback:
-    action: str
-    payload: str = ""
-
-
 def _check_allow(message: Message) -> bool:
     from app.config import get_settings
 
@@ -267,76 +259,23 @@ async def _try_ingest_answer(memory: MemoryService, *, db, user_id, topic_id, so
 
 
 def _build_ai_reply_keyboard() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="💾 Сохранить", callback_data=_callback_data("save"))],
-        [InlineKeyboardButton(text="⚡ Кратко", callback_data=_callback_data("short")), InlineKeyboardButton(text="🔎 Глубже", callback_data=_callback_data("deeper"))],
-        [InlineKeyboardButton(text="🧠 Карточки", callback_data=_callback_data("cards")), InlineKeyboardButton(text="🧪 Тест", callback_data=_callback_data("test"))],
-        [InlineKeyboardButton(text="🧭 Связанные темы", callback_data=_callback_data("related"))],
-        [InlineKeyboardButton(text="👍", callback_data=_callback_data("fb_up")), InlineKeyboardButton(text="👎", callback_data=_callback_data("fb_down")), InlineKeyboardButton(text="ошибка", callback_data=_callback_data("fb_error"))],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return build_ai_reply_keyboard()
 
 
 def _build_review_keyboard(card_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="😵 Again", callback_data=_callback_data("review_again", card_id)),
-                InlineKeyboardButton(text="😬 Hard", callback_data=_callback_data("review_hard", card_id)),
-            ],
-            [InlineKeyboardButton(text="🙂 Good", callback_data=_callback_data("review_good", card_id)), InlineKeyboardButton(text="😎 Easy", callback_data=_callback_data("review_easy", card_id))],
-            [InlineKeyboardButton(text="👁 Показать ответ", callback_data=_callback_data("review_reveal", card_id))],
-        ]
-    )
+    return build_review_keyboard(card_id)
 
 
 def _build_main_menu_reply_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📅 На сегодня"), KeyboardButton(text="🩺 Кейсы")],
-            [KeyboardButton(text="🧠 Карточки"), KeyboardButton(text="➕ Создать")],
-            [KeyboardButton(text="📚 Темы"), KeyboardButton(text="⚙️ Профиль")],
-        ],
-        resize_keyboard=True,
-        persistent=True,
-    )
-
-
-def _callback_secret() -> str:
-    settings = get_settings()
-    return getattr(settings, "user_id_hash_salt", "") or getattr(settings, "web_owner_token", "") or "dev-callback-secret"
-
-
-def _callback_signature(action: str, payload: str, bucket: int) -> str:
-    raw = f"{action}:{payload}:{bucket}".encode("utf-8")
-    return hmac.new(_callback_secret().encode("utf-8"), raw, hashlib.sha256).hexdigest()[:10]
+    return build_main_menu_reply_keyboard()
 
 
 def _callback_data(action: str, payload: str = "") -> str:
-    bucket = int(time.time() // CALLBACK_BUCKET_SECONDS)
-    return f"vx:{action}:{payload}:{_callback_signature(action, payload, bucket)}"
+    return _signed_callback_data(action, payload)
 
 
-def _valid_callback_signature(action: str, payload: str, signature: str) -> bool:
-    current = int(time.time() // CALLBACK_BUCKET_SECONDS)
-    for bucket in range(current, current - CALLBACK_TTL_BUCKETS - 1, -1):
-        if hmac.compare_digest(signature, _callback_signature(action, payload, bucket)):
-            return True
-    return False
-
-
-def parse_callback_data(data: str) -> ActionCallback | None:
-    if not data.startswith("vx:"):
-        return None
-    parts = data.split(":", 3)
-    if len(parts) != 4:
-        return None
-    _, action, payload, signature = parts
-    if not action:
-        return None
-    if not _valid_callback_signature(action, payload, signature):
-        return None
-    return ActionCallback(action=action, payload=payload)
+def parse_callback_data(data: str):
+    return _parse_callback_data(data)
 
 
 def _topic_required_text(thread_id: int | None) -> str:

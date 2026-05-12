@@ -1,11 +1,9 @@
 from datetime import UTC, datetime
 import json
-import os
 from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
-from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy import String as SQLString
 from sqlalchemy import cast
@@ -18,52 +16,22 @@ from app.db.repositories import ErrorEventRepo, FeedbackEventRepo, ModelCallRepo
 from app.learning.service import LearningService
 from app.db.session import get_db
 from app.quotas import QuotaGuard
+from app.web.document_cleanup import cleanup_document_files, document_storage_paths
+from app.web.schemas import (
+    FlashcardReviewRequest,
+    LoginRequest,
+    OnboardingRequest,
+    SearchResponse,
+    UpdateNoteRequest,
+    UserProfileUpdateRequest,
+    WebSettingsUpdateRequest,
+)
 from app.web.security import InMemoryRateLimiter, RedisBackedRateLimiter, issue_session_token, validate_session_token, verify_password
 
 router = APIRouter(prefix="/api/web", tags=["web"])
 _fallback_rate_limiter = InMemoryRateLimiter()
 _rate_limiter = RedisBackedRateLimiter(redis_url=get_settings().redis_url, fallback=_fallback_rate_limiter)
 SESSION_COOKIE = "vetstudy_session"
-
-
-class LoginRequest(BaseModel):
-    password: str
-
-
-class UpdateNoteRequest(BaseModel):
-    title: str | None = None
-    content: str
-    tags: list[str] | None = None
-
-
-class WebSettingsUpdateRequest(BaseModel):
-    language: str | None = None
-    role: str | None = None
-
-
-class UserProfileUpdateRequest(BaseModel):
-    region: str
-    species_focus: str
-
-
-class OnboardingRequest(BaseModel):
-    language: str
-    specialization: str
-    subjects: list[str]
-
-
-class SearchResponse(BaseModel):
-    id: UUID
-    title: str | None
-    content: str
-    kind: str
-    tags: list[str]
-    topic_id: UUID | None
-    created_at: datetime
-
-
-class FlashcardReviewRequest(BaseModel):
-    action: str
 
 
 def _check_token(request: Request, authorization: str | None = Header(default=None)) -> str:
@@ -204,37 +172,6 @@ def _allow_admin_rate_limit(user: User) -> bool:
         limit=settings.web_admin_rate_limit_count,
         window_seconds=settings.web_admin_rate_limit_window_seconds,
     )
-
-
-def _document_storage_paths(documents: list[Document]) -> list[str]:
-    candidate_keys = ("path", "stored_path", "file_path", "upload_path")
-    out: list[str] = []
-    for doc in documents:
-        metadata = dict(doc.metadata_ or {})
-        for key in candidate_keys:
-            value = metadata.get(key)
-            if isinstance(value, str) and value.strip():
-                out.append(value.strip())
-                break
-    return out
-
-
-def _cleanup_document_files(paths: list[str]) -> None:
-    settings = get_settings()
-    base = Path(settings.media_storage_path).resolve()
-    seen: set[Path] = set()
-    for raw_path in paths:
-        file_path = Path(raw_path)
-        resolved = file_path.resolve() if file_path.is_absolute() else (base / file_path).resolve()
-        if base not in resolved.parents:
-            continue
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        try:
-            os.remove(resolved)
-        except FileNotFoundError:
-            continue
 
 
 @router.post("/auth/session")
@@ -553,7 +490,7 @@ def delete_topic(topic_id: UUID, user: User = Depends(_get_current_user), db: Se
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
     documents = db.execute(select(Document).where(Document.user_id == user.id, Document.topic_id == topic_id)).scalars().all()
-    document_paths = _document_storage_paths(documents)
+    document_paths = document_storage_paths(documents)
     session_ids = [x.id for x in db.execute(select(ChatSession).where(ChatSession.user_id == user.id, ChatSession.topic_id == topic_id)).scalars().all()]
     if session_ids:
         db.execute(Message.__table__.delete().where(Message.session_id.in_(session_ids)))
@@ -565,7 +502,7 @@ def delete_topic(topic_id: UUID, user: User = Depends(_get_current_user), db: Se
     if topic.user_id == user.id:
         db.delete(topic)
     db.commit()
-    _cleanup_document_files(document_paths)
+    cleanup_document_files(document_paths)
     return {"ok": True}
 
 
@@ -574,7 +511,7 @@ def delete_account(user: User = Depends(_get_current_user), db: Session = Depend
     if user.role == "owner":
         raise HTTPException(status_code=400, detail="Owner account cannot be deleted via API")
     documents = db.execute(select(Document).where(Document.user_id == user.id)).scalars().all()
-    document_paths = _document_storage_paths(documents)
+    document_paths = document_storage_paths(documents)
     topic_ids = [x.id for x in db.execute(select(Topic).where(Topic.user_id == user.id)).scalars().all()]
     session_ids = [x.id for x in db.execute(select(ChatSession).where(ChatSession.user_id == user.id)).scalars().all()]
     if session_ids:
@@ -589,7 +526,7 @@ def delete_account(user: User = Depends(_get_current_user), db: Session = Depend
     db.execute(ModelCall.__table__.delete().where(ModelCall.user_id == user.id))
     db.delete(user)
     db.commit()
-    _cleanup_document_files(document_paths)
+    cleanup_document_files(document_paths)
     return {"ok": True}
 
 

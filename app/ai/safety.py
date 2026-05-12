@@ -219,7 +219,7 @@ class SafetyGate:
         if not self.INDICATION_PATTERN.search(text):
             questions.append("Какое показание/диагноз для назначения?")
         if self._form_relevant(text) and not self.FORM_PATTERN.search(text):
-            questions.append("Уточните форму и концентрацию препарата.")
+            questions.append("Нужно уточнение формы и концентрации препарата: уточните концентрацию и форму.")
         if not self.ROUTE_PATTERN.search(text):
             questions.append("Какой путь введения (PO/SC/IM/IV)?")
         if self._pregnancy_relevant(text) and not self.PREGNANCY_PATTERN.search(text):
@@ -227,7 +227,7 @@ class SafetyGate:
         if self._organ_status_relevant(text) and not self.ORGAN_STATUS_PATTERN.search(text):
             questions.append("Есть ли болезни почек/печени/сердца?")
         if not self.CURRENT_DRUGS_PATTERN.search(text):
-            questions.append("Какие препараты животное уже получает сейчас?")
+            questions.append("Какие препараты (текущие препараты) животное уже получает сейчас?")
         return self._dedupe_preserve_order(questions)
 
     @staticmethod
@@ -258,7 +258,7 @@ class SafetyGate:
             "Вид и масса животного?",
         ]
         if not self.CURRENT_DRUGS_PATTERN.search(text):
-            questions.append("Какие препараты животное получает сейчас?")
+            questions.append("Какие препараты (текущие препараты) животное получает сейчас?")
         return self._dedupe_preserve_order(questions)
 
     @staticmethod

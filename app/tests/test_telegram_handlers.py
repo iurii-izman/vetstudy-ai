@@ -371,6 +371,14 @@ def test_callback_parsing():
     assert handlers.parse_callback_data("vx:cards:123:bad-signature") is None
 
 
+def test_review_keyboard_uses_signed_callbacks():
+    markup = handlers._build_review_keyboard("card-1")
+    callback_values = [button.callback_data for row in markup.inline_keyboard for button in row]
+    assert callback_values
+    assert all(isinstance(value, str) and value.startswith("vx:") for value in callback_values)
+    assert all(handlers.parse_callback_data(value) is not None for value in callback_values)
+
+
 @pytest.mark.asyncio
 async def test_search_formats_results(monkeypatch):
     monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
