@@ -21,6 +21,8 @@ def test_product_analytics_summary_methods():
         service = ProductAnalyticsService(db)
         service.track(user_id=user.id, event_name="activation_start")
         service.track(user_id=user.id, event_name="activation_first_question")
+        service.track(user_id=user.id, event_name="onboarding_step_completed", properties={"step": "bind_topic"})
+        service.track(user_id=user.id, event_name="weekly_recap_opened")
         db.add(ProductEvent(user_id=user.id, event_name="search_performed", properties={"results": 0, "topic_title": "T"}, created_at=datetime.now(UTC) - timedelta(days=1)))
         db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 0, "memory_hits": 0, "document_hits": 0}))
         db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 3, "memory_hits": 2, "document_hits": 1}))
@@ -36,5 +38,7 @@ def test_product_analytics_summary_methods():
         assert retrieval["avg_retrieved_chunks"] == 1.5
         summary = service.behavior_summary(days=30)
         assert "events" in summary
+        assert summary["events"].get("onboarding_step_completed", 0) == 1
+        assert summary["events"].get("weekly_recap_opened", 0) == 1
     finally:
         db.close()

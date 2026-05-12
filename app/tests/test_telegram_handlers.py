@@ -291,6 +291,9 @@ async def test_today_command_builds_route_and_tracks_event(monkeypatch):
             review_cards=["Q1", "Q2", "Q3"],
             reflection_question="Что проверишь первым?",
             used_fallback=False,
+            weak_topics=["Терапия"],
+            zero_result_searches=1,
+            negative_feedback_count=1,
         ),
     )
     message = FakeMessage(user_id=1, text="/today")
@@ -298,8 +301,38 @@ async def test_today_command_builds_route_and_tracks_event(monkeypatch):
     assert message.answers
     text = message.answers[0]["text"]
     assert "Маршрут на 15-30 минут" in text
-    assert "Карточки к сроку: 4" in text
+    assert "карточки к сроку 4" in text.lower()
+    assert "Zero-result поисков" in text
     assert tracked and tracked[0]["event_name"] == "learning_route_opened"
+
+
+@pytest.mark.asyncio
+async def test_weekly_command_outputs_recap(monkeypatch):
+    tracked = []
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={})),
+    )
+    monkeypatch.setattr(
+        handlers.LearningService,
+        "build_weekly_recap",
+        lambda self, **kwargs: SimpleNamespace(
+            cards_created=6,
+            cards_reviewed=9,
+            high_risk_queries=2,
+            questions_asked=14,
+            weak_topics=["Кардио"],
+        ),
+    )
+    monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)))
+    message = FakeMessage(user_id=1, text="/weekly")
+    await handlers.cmd_weekly(message)
+    assert "Weekly recap" in message.answers[0]["text"]
+    assert "Кардио" in message.answers[0]["text"]
+    assert tracked and tracked[0]["event_name"] == "weekly_recap_opened"
 
 
 @pytest.mark.asyncio

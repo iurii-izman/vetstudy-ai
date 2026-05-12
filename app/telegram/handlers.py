@@ -38,6 +38,8 @@ logger = logging.getLogger("app.telegram.handlers")
 MODES = {"short", "practical", "deep", "exam", "protocol", "cards", "quiz", "evidence"}
 REGION_VALUES = {"us", "eu", "local", "unspecified"}
 SPECIES_VALUES = {"dog", "cat", "dog_cat"}
+ONBOARDING_STEPS = ("bind_topic", "today_route", "first_case")
+CASE_LEVELS = ("basic", "intermediate", "advanced")
 DEFAULT_SUBJECTS = [
     ("pharmacology", "Фармакология", "Фокус на препаратах, дозах, противопоказаниях и рисках."),
     ("surgery", "Хирургия", "Фокус на хирургической тактике и послеоперационном ведении."),
@@ -347,11 +349,54 @@ def _topic_required_text(thread_id: int | None) -> str:
 
 
 def _provider_error_text() -> str:
-    return "LLM-провайдер временно недоступен. Проверьте ключи/лимиты и повторите позже."
+    return "Провайдер временно недоступен. Следующий шаг: проверьте /status и повторите через 1-2 минуты."
 
 
 def _quota_error_text() -> str:
-    return "Лимит запросов или бюджета исчерпан. Попробуйте позже."
+    return "Лимит запросов/бюджета исчерпан. Следующий шаг: переключитесь на /review или /today и попробуйте снова после обновления лимита."
+
+
+def _safety_error_text() -> str:
+    return "Для безопасного ответа не хватает данных. Следующий шаг: укажите вид, вес, возраст, симптомы и точный препарат/ситуацию."
+
+
+def _onboarding_state(user) -> dict:
+    settings = dict(user.settings or {})
+    onboarding = dict(settings.get("onboarding") or {})
+    completed = [x for x in onboarding.get("completed_steps", []) if x in ONBOARDING_STEPS]
+    onboarding["completed_steps"] = sorted(set(completed), key=ONBOARDING_STEPS.index)
+    onboarding["is_completed"] = bool(onboarding.get("is_completed", False))
+    return onboarding
+
+
+def _save_onboarding_state(user, onboarding: dict) -> None:
+    settings = dict(user.settings or {})
+    settings["onboarding"] = onboarding
+    user.settings = settings
+    if onboarding.get("is_completed"):
+        user.onboarding_completed = True
+
+
+def _complete_onboarding_step(*, user, step: str, analytics: ProductAnalyticsService, topic_id=None) -> bool:
+    if step not in ONBOARDING_STEPS:
+        return False
+    onboarding = _onboarding_state(user)
+    completed = list(onboarding.get("completed_steps", []))
+    if step in completed:
+        return False
+    completed.append(step)
+    onboarding["completed_steps"] = sorted(set(completed), key=ONBOARDING_STEPS.index)
+    onboarding["is_completed"] = len(onboarding["completed_steps"]) >= len(ONBOARDING_STEPS)
+    _save_onboarding_state(user, onboarding)
+    analytics.track(
+        user_id=user.id,
+        topic_id=topic_id,
+        event_name="onboarding_step_completed",
+        properties={"step": step, "completed_steps": onboarding["completed_steps"]},
+    )
+    if onboarding["is_completed"]:
+        analytics.track(user_id=user.id, topic_id=topic_id, event_name="onboarding_completed", properties={"steps": onboarding["completed_steps"]})
+    return True
 
 
 def _user_profile(user) -> dict:
@@ -423,9 +468,18 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             )
             safety = safety_gate.check(text)
             if not safety.allowed:
-                warn = safety.warning or "Недостаточно данных."
+                warn = safety.warning or _safety_error_text()
                 if safety.clarifying_questions:
                     warn = f"{warn}\n\n" + "\n".join(f"- {q}" for q in safety.clarifying_questions)
+                else:
+                    warn = f"{warn}\n\nСледующий шаг: добавьте недостающие клинические данные и повторите запрос."
+                analytics.track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    session_id=session.id,
+                    event_name="safety_clarification_required",
+                    properties={"risk_tags": getattr(safety, "risk_tags", [])},
+                )
                 await message.answer(warn)
                 return
             memory = MemoryService(MemoryRepo(db), topic_repo=TopicRepo(db), embedder=llm_router, chunk_repo=DocumentChunkRepo(db))
@@ -549,12 +603,12 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 details={"topic_id": str(topic.id), "message_id": message.message_id},
             )
             logger.exception("provider_runtime_error", extra={"event": "telegram_pipeline_error", "error_category": "provider_error"})
-            await message.answer(map_pipeline_error(RuntimeError("provider")).user_message)
+            await message.answer(_provider_error_text())
             return
         except Exception as exc:
             mapped = map_pipeline_error(exc)
             if mapped.category == "quota_error":
-                await message.answer(mapped.user_message)
+                await message.answer(_quota_error_text())
                 return
             ErrorEventRepo(db).add(
                 user_id=user.id,
@@ -564,7 +618,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             )
             ProductAnalyticsService(db).track(user_id=user.id, topic_id=topic.id, event_name="error_event", properties={"kind": "unexpected"})
             logger.exception("pipeline_failed", extra={"event": "telegram_pipeline_error", "error_category": "telegram_error"})
-            await message.answer(mapped.user_message)
+            await message.answer("Временная ошибка обработки. Следующий шаг: повторите запрос или используйте /today для продолжения обучения.")
             return
         finally:
             db.close()
@@ -578,17 +632,24 @@ async def cmd_start(message: Message):
     try:
         try:
             user = UserRepo(db).get_or_create(message.from_user.id, message.from_user.full_name if message.from_user else None)
+            analytics = ProductAnalyticsService(db)
             ProductAnalyticsService(db).track(user_id=user.id, event_name="activation_start")
+            onboarding = _onboarding_state(user)
+            if not onboarding:
+                onboarding = {"completed_steps": [], "is_completed": False}
+                _save_onboarding_state(user, onboarding)
+                analytics.track(user_id=user.id, event_name="onboarding_started", properties={"steps_total": len(ONBOARDING_STEPS)})
+                db.commit()
         except Exception:
             logger.debug("activation_start_track_failed", exc_info=True)
     finally:
         db.close()
     await message.answer(
-        "VetStudy AI готов.\n"
-        "Для работы используйте кнопки меню или команды:\n"
-        "1) /create_default_topics\n"
-        "2) или /bind_topic <slug_or_name>\n"
-        "3) задайте вопрос в topic\n",
+        "VetStudy AI готов. Онбординг (3 шага):\n"
+        "1) Привяжи учебный topic: /create_default_topics или /bind_topic <slug_or_name>\n"
+        "2) Открой персональный маршрут: /today\n"
+        "3) Запусти клинический кейс: /case basic\n\n"
+        "CTA: начни с шага 1 прямо сейчас.",
         reply_markup=_build_main_menu_reply_keyboard(),
     )
 
@@ -631,6 +692,7 @@ async def cmd_help(message: Message):
         "Онбординг:\n/start\n/status\n/topics\n/create_default_topics\n/bind_topic <slug_or_name>\n\n"
         "Сессия:\n/new\n/mode\n/evidence\n/save\n/search\n/summary\n/profile\n\n"
         "Обучение:\n/today\n/cards\n/review\n/quiz\n/export\n\n"
+        "Отчет:\n/weekly\n\n"
         "Клинические кейсы:\n/case — выбрать виртуальный кейс\n/case_answer — отправить анализ на оценку\n\n"
         "Система:\n/docs\n/help",
     )
@@ -785,6 +847,8 @@ async def cmd_bind_topic(message: Message, command: CommandObject):
             event_name="activation_topic_bound",
             properties={"subject": subject.slug},
         )
+        _complete_onboarding_step(user=user, step="bind_topic", analytics=ProductAnalyticsService(db), topic_id=topic.id)
+        db.commit()
         await message.answer(
             f"Привязано: '{topic.title}' (slug={subject.slug}) к thread id {message.message_thread_id}.",
         )
@@ -1164,22 +1228,69 @@ async def cmd_today(message: Message):
             await message.answer(_topic_required_text(message.message_thread_id))
             return
         route = LearningService().build_daily_route(db=db, user_id=user.id, topic_id=topic.id)
-        ProductAnalyticsService(db).track(
+        analytics = ProductAnalyticsService(db)
+        analytics.track(
             user_id=user.id,
             topic_id=topic.id,
             event_name="learning_route_opened",
-            properties={"used_fallback": route.used_fallback, "due_count": route.due_count},
+            properties={
+                "used_fallback": route.used_fallback,
+                "due_count": route.due_count,
+                "weak_topics_count": len(route.weak_topics),
+                "zero_result_searches": route.zero_result_searches,
+                "negative_feedback_count": route.negative_feedback_count,
+            },
         )
+        _complete_onboarding_step(user=user, step="today_route", analytics=analytics, topic_id=topic.id)
         lines = [
             "Маршрут на 15-30 минут:",
             f"1) Мини-кейс: {route.mini_case}",
             f"2) Препарат/риск: {route.drug_risk}",
-            f"3) Карточки к сроку: {route.due_count}",
+            f"3) Повтор: карточки к сроку {route.due_count}",
             "4) Повтори 3 карточки:",
         ]
         for idx, card_front in enumerate(route.review_cards[:3], start=1):
             lines.append(f"   {idx}. {card_front}")
+        if route.weak_topics:
+            lines.append(f"Слабые темы: {', '.join(route.weak_topics)}")
+        if route.zero_result_searches > 0:
+            lines.append(f"Zero-result поисков за 7 дней: {route.zero_result_searches}")
+        if route.negative_feedback_count > 0:
+            lines.append(f"Негативный feedback за 7 дней: {route.negative_feedback_count}")
         lines.append(f"5) Reflection: {route.reflection_question}")
+        await message.answer("\n".join(lines))
+    finally:
+        db.close()
+
+
+@router.message(Command("weekly"))
+async def cmd_weekly(message: Message):
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        chat_db = ChatDBService(db)
+        user = chat_db.ensure_user(message.from_user.id, message.from_user.full_name if message.from_user else None)
+        recap = LearningService().build_weekly_recap(db=db, user_id=user.id)
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            event_name="weekly_recap_opened",
+            properties={
+                "cards_created": recap.cards_created,
+                "cards_reviewed": recap.cards_reviewed,
+                "high_risk_queries": recap.high_risk_queries,
+                "questions_asked": recap.questions_asked,
+            },
+        )
+        lines = [
+            "Weekly recap (7 дней):",
+            f"- Cards created: {recap.cards_created}",
+            f"- Review done: {recap.cards_reviewed}",
+            f"- High-risk questions: {recap.high_risk_queries}",
+            f"- Questions asked: {recap.questions_asked}",
+        ]
+        if recap.weak_topics:
+            lines.append(f"- Weak topics: {', '.join(recap.weak_topics)}")
         await message.answer("\n".join(lines))
     finally:
         db.close()
@@ -1191,12 +1302,23 @@ async def cmd_today(message: Message):
 from app.cases import CASES, CASE_EDUCATIONAL_DISCLAIMER, get_case_by_id  # noqa: E402
 
 
-def _case_select_keyboard() -> InlineKeyboardMarkup:
+def _case_select_keyboard(level: str | None = None) -> InlineKeyboardMarkup:
+    items = _cases_for_level(level) if level in CASE_LEVELS else CASES
     rows = [
         [InlineKeyboardButton(text=c["title"], callback_data=_callback_data("case_select", c["id"]))]
-        for c in CASES
+        for c in items
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _case_level_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Basic", callback_data=_callback_data("case_level", "basic"))],
+            [InlineKeyboardButton(text="Intermediate", callback_data=_callback_data("case_level", "intermediate"))],
+            [InlineKeyboardButton(text="Advanced", callback_data=_callback_data("case_level", "advanced"))],
+        ]
+    )
 
 
 def _case_answer_keyboard(case_id: str) -> InlineKeyboardMarkup:
@@ -1210,6 +1332,50 @@ def _case_answer_keyboard(case_id: str) -> InlineKeyboardMarkup:
 
 def _get_user_case_id(user) -> str | None:
     return (user.settings or {}).get("active_case_id")
+
+
+def _get_case_level(user) -> str:
+    settings = dict(user.settings or {})
+    level = str(settings.get("case_level", "basic")).lower()
+    if level not in CASE_LEVELS:
+        return "basic"
+    return level
+
+
+def _set_case_level(user, level: str) -> None:
+    settings = dict(user.settings or {})
+    settings["case_level"] = level if level in CASE_LEVELS else "basic"
+    user.settings = settings
+
+
+def _case_level_for_case(case_id: str) -> str:
+    if case_id in {"vomiting_dog", "nsaid_risk_dog", "bloody_diarrhea_puppy", "seizure_dog"}:
+        return "basic"
+    if case_id in {"dyspnea_cat", "pyometra_suspicion", "blocked_cat"}:
+        return "intermediate"
+    return "advanced"
+
+
+def _cases_for_level(level: str) -> list[dict]:
+    return [item for item in CASES if _case_level_for_case(item["id"]) == level] or CASES
+
+
+def _apply_case_progression(user, submitted_level: str) -> tuple[str, dict]:
+    settings = dict(user.settings or {})
+    progress = dict(settings.get("case_progress") or {})
+    completed = dict(progress.get("completed") or {})
+    completed[submitted_level] = int(completed.get(submitted_level, 0) or 0) + 1
+    next_level = _get_case_level(user)
+    if submitted_level == "basic" and completed.get("basic", 0) >= 2:
+        next_level = "intermediate"
+    elif submitted_level == "intermediate" and completed.get("intermediate", 0) >= 2:
+        next_level = "advanced"
+    progress["completed"] = completed
+    progress["updated_at"] = datetime.now(UTC).isoformat()
+    settings["case_progress"] = progress
+    settings["case_level"] = next_level
+    user.settings = settings
+    return next_level, progress
 
 
 def _set_user_case_id(user, case_id: str | None) -> None:
@@ -1232,7 +1398,13 @@ async def cmd_case(message: Message, command: CommandObject):
             message.from_user.id,
             message.from_user.full_name if message.from_user else None,
         )
-        args = (command.args or "").strip()
+        args = (command.args or "").strip().lower()
+        if args in CASE_LEVELS:
+            _set_case_level(user, args)
+            db.commit()
+            ProductAnalyticsService(db).track(user_id=user.id, event_name="case_difficulty_selected", properties={"level": args, "source": "command"})
+            await message.answer(f"Уровень кейсов: {args}. Выбирай кейс:", reply_markup=_case_select_keyboard(args))
+            return
         if args:
             # Direct selection by id
             case = get_case_by_id(args)
@@ -1244,8 +1416,9 @@ async def cmd_case(message: Message, command: CommandObject):
             ProductAnalyticsService(db).track(
                 user_id=user.id,
                 event_name="case_started",
-                properties={"case_id": case["id"], "case_title": case["title"]},
+                properties={"case_id": case["id"], "case_title": case["title"], "difficulty": _case_level_for_case(case["id"]), "selected_level": _get_case_level(user)},
             )
+            _complete_onboarding_step(user=user, step="first_case", analytics=ProductAnalyticsService(db))
             text = (
                 f"<b>{case['title']}</b>\n\n"
                 f"{case['description']}"
@@ -1255,8 +1428,8 @@ async def cmd_case(message: Message, command: CommandObject):
             await _answer_telegram_html(message, text, reply_markup=_case_answer_keyboard(case["id"]))
         else:
             await message.answer(
-                "Выбери учебный кейс:",
-                reply_markup=_case_select_keyboard(),
+                f"Выбери уровень и кейс (текущий уровень: {_get_case_level(user)}):",
+                reply_markup=_case_level_keyboard(),
             )
     finally:
         db.close()
@@ -1299,7 +1472,7 @@ async def cmd_case_answer(message: Message):
         await _send_typing(message)
         quota = QuotaGuard(get_settings()).check_user_and_global(db, user)
         if not quota.allowed:
-            await message.answer(quota.message or "Лимит исчерпан.")
+            await message.answer(_quota_error_text())
             return
 
         prompt = prompt_manager.build_case_eval(
@@ -1311,9 +1484,15 @@ async def cmd_case_answer(message: Message):
         ProductAnalyticsService(db).track(
             user_id=user.id,
             event_name="case_submitted",
-            properties={"case_id": case_id, "answer_len": len(student_answer)},
+            properties={"case_id": case_id, "answer_len": len(student_answer), "difficulty": _case_level_for_case(case_id), "selected_level": _get_case_level(user)},
         )
         answer = await llm_router.generate(db, user.id, prompt, purpose="case_eval")
+        next_level, progress = _apply_case_progression(user, _case_level_for_case(case_id))
+        ProductAnalyticsService(db).track(
+            user_id=user.id,
+            event_name="case_progression_updated",
+            properties={"submitted_level": _case_level_for_case(case_id), "next_level": next_level, "completed": progress.get("completed", {})},
+        )
 
         # Save to session if possible
         topic = TopicRepo(db).get_by_chat_thread(message.chat.id, message.message_thread_id)
@@ -1356,24 +1535,24 @@ async def cmd_case_answer(message: Message):
         try:
             await message.answer(
                 "⚠️ <i>Это учебная обратная связь, а не клиническое заключение. "
-                "Для реального животного — очная консультация ветеринара.</i>",
+                f"Для реального животного — очная консультация ветеринара.</i>\nСледующий уровень: <b>{next_level}</b>",
                 parse_mode=TELEGRAM_HTML_PARSE_MODE,
                 reply_markup=fb_keyboard,
             )
         except Exception:
             pass
-    except RuntimeError as exc:
+    except RuntimeError:
         ErrorEventRepo(db).add(
             user_id=user.id,
             scope="telegram",
             category="case_eval_provider_error",
             details={"case_id": case_id},
         )
-        await message.answer(map_pipeline_error(exc).user_message)
+        await message.answer(_provider_error_text())
     except Exception as exc:
         mapped = map_pipeline_error(exc)
         if mapped.category == "quota_error":
-            await message.answer(mapped.user_message)
+            await message.answer(_quota_error_text())
         else:
             ErrorEventRepo(db).add(
                 user_id=user.id,
@@ -1381,7 +1560,7 @@ async def cmd_case_answer(message: Message):
                 category="case_eval_unexpected_error",
                 details={"case_id": case_id, "error": str(exc)},
             )
-            await message.answer(mapped.user_message)
+            await message.answer("Временная ошибка кейса. Следующий шаг: сократите ответ до ключевых пунктов и повторите /case_answer.")
     finally:
         db.close()
 
@@ -1512,8 +1691,9 @@ async def on_ai_action(query: CallbackQuery):
             ProductAnalyticsService(db).track(
                 user_id=user.id,
                 event_name="case_started",
-                properties={"case_id": case["id"], "case_title": case["title"]},
+                properties={"case_id": case["id"], "case_title": case["title"], "difficulty": _case_level_for_case(case["id"]), "selected_level": _get_case_level(user)},
             )
+            _complete_onboarding_step(user=user, step="first_case", analytics=ProductAnalyticsService(db))
         finally:
             db.close()
         if query.message:
@@ -1530,12 +1710,38 @@ async def on_ai_action(query: CallbackQuery):
                 await query.message.answer(text, parse_mode=TELEGRAM_HTML_PARSE_MODE,
                                            reply_markup=_case_answer_keyboard(case["id"]))
         return
+    if parsed.action == "case_level":
+        level = parsed.payload if parsed.payload in CASE_LEVELS else "basic"
+        db = new_session()
+        try:
+            user = UserRepo(db).get_or_create(
+                query.from_user.id,
+                query.from_user.full_name if query.from_user else None,
+            )
+            _set_case_level(user, level)
+            db.commit()
+            ProductAnalyticsService(db).track(user_id=user.id, event_name="case_difficulty_selected", properties={"level": level, "source": "callback"})
+        finally:
+            db.close()
+        if query.message:
+            await query.message.answer(f"Уровень: {level}. Выбери кейс:", reply_markup=_case_select_keyboard(level))
+        return
     if parsed.action == "case_list":
         if query.message:
+            level = "basic"
+            db = new_session()
             try:
-                await query.message.edit_text("Выбери учебный кейс:", reply_markup=_case_select_keyboard())
+                user = UserRepo(db).get_or_create(
+                    query.from_user.id,
+                    query.from_user.full_name if query.from_user else None,
+                )
+                level = _get_case_level(user)
+            finally:
+                db.close()
+            try:
+                await query.message.edit_text(f"Выбери учебный кейс ({level}):", reply_markup=_case_select_keyboard(level))
             except Exception:
-                await query.message.answer("Выбери учебный кейс:", reply_markup=_case_select_keyboard())
+                await query.message.answer(f"Выбери учебный кейс ({level}):", reply_markup=_case_select_keyboard(level))
         return
     if parsed.action == "case_fb":
         db = new_session()

@@ -83,6 +83,9 @@ class _FakeResult:
     def one_or_none(self):
         return self._row
 
+    def all(self):
+        return self._row or []
+
 
 class _FakeDB:
     def __init__(self, results):
@@ -109,12 +112,23 @@ def test_build_daily_route_fallback_when_no_cards(monkeypatch):
             return []
 
     monkeypatch.setattr(learning_service_module, "FlashcardRepo", _Repo)
-    db = _FakeDB([_FakeResult(scalar=0), _FakeResult(scalar=0), _FakeResult(row=("Терапия",))])
+    db = _FakeDB(
+        [
+            _FakeResult(scalar=0),
+            _FakeResult(scalar=0),
+            _FakeResult(row=[]),
+            _FakeResult(scalar=0),
+            _FakeResult(row=[]),
+            _FakeResult(row=("Терапия",)),
+        ]
+    )
     route = service.build_daily_route(db=db, user_id="u-1", topic_id="t-1", now=datetime(2026, 5, 3, 10, 0, 0))
     assert route.used_fallback is True
     assert route.due_count == 0
     assert len(route.review_cards) == 3
     assert "НПВС у кошек" in route.drug_risk
+    assert route.zero_result_searches == 0
+    assert route.negative_feedback_count == 0
 
 
 def test_build_daily_route_from_existing_cards(monkeypatch):
@@ -136,9 +150,40 @@ def test_build_daily_route_from_existing_cards(monkeypatch):
             return all_cards
 
     monkeypatch.setattr(learning_service_module, "FlashcardRepo", _Repo)
-    db = _FakeDB([_FakeResult(scalar=1), _FakeResult(scalar=2), _FakeResult(row=("Терапия",))])
+    db = _FakeDB(
+        [
+            _FakeResult(scalar=1),
+            _FakeResult(scalar=2),
+            _FakeResult(row=[({"results": 0},)]),
+            _FakeResult(scalar=1),
+            _FakeResult(row=[("Терапия", 2)]),
+            _FakeResult(row=("Терапия",)),
+        ]
+    )
     route = service.build_daily_route(db=db, user_id="u-1", topic_id="t-1", now=datetime(2026, 5, 3, 10, 0, 0))
     assert route.used_fallback is False
     assert route.due_count == 2
     assert len(route.review_cards) == 3
     assert "Мини-кейс" in route.mini_case
+    assert route.zero_result_searches == 1
+    assert route.negative_feedback_count == 1
+    assert "Терапия" in route.weak_topics
+
+
+def test_build_weekly_recap_counts(monkeypatch):
+    service = LearningService()
+    db = _FakeDB(
+        [
+            _FakeResult(scalar=5),
+            _FakeResult(scalar=8),
+            _FakeResult(scalar=2),
+            _FakeResult(scalar=11),
+            _FakeResult(row=[("Терапия", 3), ("Кардио", 1)]),
+        ]
+    )
+    recap = service.build_weekly_recap(db=db, user_id="u-1", now=datetime(2026, 5, 3, 10, 0, 0))
+    assert recap.cards_created == 5
+    assert recap.cards_reviewed == 8
+    assert recap.high_risk_queries == 2
+    assert recap.questions_asked == 11
+    assert recap.weak_topics == ["Терапия", "Кардио"]

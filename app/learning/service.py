@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 
-from app.db.models import ProductEvent, ReviewEvent, Topic
+from app.db.models import FeedbackEvent, Message, ProductEvent, ReviewEvent, Session as ChatSession, Topic
 
 from app.db.models import Flashcard
 from app.db.repositories import FlashcardRepo
@@ -29,6 +29,18 @@ class DailyLearningRoute:
     review_cards: list[str]
     reflection_question: str
     used_fallback: bool
+    weak_topics: list[str]
+    zero_result_searches: int
+    negative_feedback_count: int
+
+
+@dataclass
+class WeeklyRecap:
+    cards_created: int
+    cards_reviewed: int
+    high_risk_queries: int
+    questions_asked: int
+    weak_topics: list[str]
 
 
 class LearningService:
@@ -162,6 +174,7 @@ class LearningService:
 
     def build_daily_route(self, *, db, user_id, topic_id=None, now: datetime | None = None) -> DailyLearningRoute:
         now = now or datetime.now(UTC)
+        since_7d = now - timedelta(days=7)
         due_cards = FlashcardRepo(db).list_due(user_id=user_id, topic_id=topic_id, now=now, limit=30)
         all_cards = FlashcardRepo(db).by_user(user_id, limit=200)
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -185,6 +198,38 @@ class LearningService:
             ).scalar_one()
             or 0
         )
+        search_rows = db.execute(
+            select(ProductEvent.properties).where(
+                ProductEvent.user_id == user_id,
+                ProductEvent.event_name == "search_performed",
+                ProductEvent.created_at >= since_7d,
+            )
+        ).all()
+        zero_result_searches = sum(1 for row in search_rows if int((row[0] or {}).get("results", 0) or 0) == 0)
+        negative_feedback_count = int(
+            db.execute(
+                select(func.count(FeedbackEvent.id)).where(
+                    FeedbackEvent.user_id == user_id,
+                    FeedbackEvent.feedback_type.in_(["down", "error"]),
+                    FeedbackEvent.created_at >= since_7d,
+                )
+            ).scalar_one()
+            or 0
+        )
+        weak_topic_rows = db.execute(
+            select(Topic.title, func.count(ReviewEvent.id))
+            .join(ReviewEvent, ReviewEvent.topic_id == Topic.id)
+            .where(
+                ReviewEvent.user_id == user_id,
+                ReviewEvent.created_at >= since_7d,
+                ReviewEvent.score.is_not(None),
+                ReviewEvent.score <= 1,
+            )
+            .group_by(Topic.title)
+            .order_by(func.count(ReviewEvent.id).desc())
+            .limit(3)
+        ).all()
+        weak_topics = [str(title) for title, _ in weak_topic_rows if title]
         topic_title = None
         if topic_id is not None:
             topic_row = db.execute(select(Topic.title).where(Topic.id == topic_id)).one_or_none()
@@ -203,6 +248,9 @@ class LearningService:
                 ],
                 reflection_question="Какое одно уточнение в приеме сегодня сильнее всего снизило бы риск клинической ошибки?",
                 used_fallback=True,
+                weak_topics=weak_topics,
+                zero_result_searches=zero_result_searches,
+                negative_feedback_count=negative_feedback_count,
             )
 
         review_cards = [card.front for card in due_cards[:3]]
@@ -235,6 +283,10 @@ class LearningService:
             reflection_question = "Какой пробел в теме стоит превратить в 1 новую карточку после сегодняшнего кейса?"
         else:
             reflection_question = "Какая типичная ошибка по этой теме у тебя еще возможна и как ты ее заранее поймаешь?"
+        if negative_feedback_count > 0:
+            reflection_question = "Какой риск в твоих последних ответах уже отмечен как слабое место и как ты его проверишь сегодня?"
+        elif zero_result_searches > 0:
+            reflection_question = "Как переформулировать вопрос так, чтобы поиск дал контекст вместо нулевого результата?"
 
         return DailyLearningRoute(
             mini_case=mini_case,
@@ -243,6 +295,74 @@ class LearningService:
             review_cards=review_cards[:3],
             reflection_question=reflection_question,
             used_fallback=False,
+            weak_topics=weak_topics,
+            zero_result_searches=zero_result_searches,
+            negative_feedback_count=negative_feedback_count,
+        )
+
+    def build_weekly_recap(self, *, db, user_id, now: datetime | None = None) -> WeeklyRecap:
+        now = now or datetime.now(UTC)
+        since = now - timedelta(days=7)
+        cards_created = int(
+            db.execute(
+                select(func.count(ProductEvent.id)).where(
+                    ProductEvent.user_id == user_id,
+                    ProductEvent.event_name == "cards_created",
+                    ProductEvent.created_at >= since,
+                )
+            ).scalar_one()
+            or 0
+        )
+        cards_reviewed = int(
+            db.execute(
+                select(func.count(ReviewEvent.id)).where(
+                    ReviewEvent.user_id == user_id,
+                    ReviewEvent.created_at >= since,
+                )
+            ).scalar_one()
+            or 0
+        )
+        high_risk_queries = int(
+            db.execute(
+                select(func.count(ProductEvent.id)).where(
+                    ProductEvent.user_id == user_id,
+                    ProductEvent.event_name == "high_risk_query",
+                    ProductEvent.created_at >= since,
+                )
+            ).scalar_one()
+            or 0
+        )
+        questions_asked = int(
+            db.execute(
+                select(func.count(Message.id))
+                .join(ChatSession, ChatSession.id == Message.session_id)
+                .where(
+                    ChatSession.user_id == user_id,
+                    Message.role == "user",
+                    Message.created_at >= since,
+                )
+            ).scalar_one()
+            or 0
+        )
+        weak_rows = db.execute(
+            select(Topic.title, func.count(ReviewEvent.id))
+            .join(ReviewEvent, ReviewEvent.topic_id == Topic.id)
+            .where(
+                ReviewEvent.user_id == user_id,
+                ReviewEvent.created_at >= since,
+                ReviewEvent.score.is_not(None),
+                ReviewEvent.score <= 1,
+            )
+            .group_by(Topic.title)
+            .order_by(func.count(ReviewEvent.id).desc())
+            .limit(3)
+        ).all()
+        return WeeklyRecap(
+            cards_created=cards_created,
+            cards_reviewed=cards_reviewed,
+            high_risk_queries=high_risk_queries,
+            questions_asked=questions_asked,
+            weak_topics=[str(title) for title, _ in weak_rows if title],
         )
 
     def apply_review(self, *, card: Flashcard, action: str, now: datetime | None = None) -> tuple[Flashcard, int]:
