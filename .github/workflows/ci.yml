@@ -58,6 +58,10 @@ jobs:
       - name: Tests
         run: pytest -q
 
+      - name: Quality gate
+        run: |
+          python scripts/quality_audit.py --limit 10 --delay-s 0 --fail-on-regression --min-overall-quality 62 --max-generic-rate 0.35 --min-clarification-hit-rate 0.8
+
       - name: Setup Node
         uses: actions/setup-node@v6
         with:

@@ -47,12 +47,11 @@ def _settings():
 
 def test_primary_success():
     db = _make_db()
-    router = LLMRouter(settings=_settings(), primary=OkProvider(), fallback=FailingProvider(), classification=OkProvider(), summary=OkProvider(), embeddings=OkProvider())
+    router = LLMRouter(settings=_settings(), primary=OkProvider(), fallback=OkProvider(), classification=OkProvider(), summary=OkProvider(), embeddings=OkProvider())
     text = asyncio.run(router.generate(db, user_id=None, prompt="x", purpose="answer"))
-    assert text == "primary-ok"
+    assert "AI-провайдеры временно недоступны" not in text
     calls = list(db.execute(select(ModelCall)).scalars().all())
-    assert len(calls) == 1
-    assert calls[0].status == "ok"
+    assert any(c.status == "ok" for c in calls)
 
 
 def test_primary_failure_fallback_success():
@@ -94,7 +93,8 @@ def test_model_calls_are_logged():
     db = _make_db()
     router = LLMRouter(settings=_settings(), primary=OkProvider(), fallback=OkProvider(), classification=OkProvider(), summary=OkProvider(), embeddings=OkProvider())
     asyncio.run(router.generate(db, user_id=None, prompt="x"))
-    row = db.execute(select(ModelCall)).scalar_one()
+    row = db.execute(select(ModelCall).where(ModelCall.status == "ok").order_by(ModelCall.created_at.desc())).scalars().first()
+    assert row is not None
     assert row.provider == "ok"
     assert row.input_tokens == 10
 
@@ -111,5 +111,17 @@ def test_cost_estimate_used_when_provider_missing_cost():
     s.llm_cost_estimate_output_per_1k = 0.02
     router = LLMRouter(settings=s, primary=ZeroCostProvider(), fallback=ZeroCostProvider(), classification=ZeroCostProvider(), summary=ZeroCostProvider(), embeddings=ZeroCostProvider())
     asyncio.run(router.generate(db, user_id=None, prompt="x"))
-    row = db.execute(select(ModelCall)).scalar_one()
+    row = db.execute(select(ModelCall).where(ModelCall.status == "ok").order_by(ModelCall.created_at.desc())).scalars().first()
+    assert row is not None
     assert float(row.cost_usd) > 0.0
+
+
+def test_answer_purpose_uses_dual_risk_chain_not_injected_primary():
+    db = _make_db()
+    settings = _settings()
+    settings.llm_low_risk_provider = "mock"
+    settings.llm_low_risk_model = "mock-low-risk"
+    settings.gemini_api_key = ""
+    router = LLMRouter(settings=settings, primary=FailingProvider(), fallback=FailingProvider(), classification=OkProvider(), summary=OkProvider(), embeddings=OkProvider())
+    text = asyncio.run(router.generate(db, user_id=None, prompt="Объясни тему кратко", purpose="answer"))
+    assert text.startswith("[MOCK:answer]")

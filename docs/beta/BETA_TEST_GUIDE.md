@@ -16,7 +16,35 @@ python scripts/quality_audit.py
 ```
 
 ## Команды бота
-`/start`, `/help`, `/topics`, `/bind_topic <slug_or_name>`, `/create_default_topics`, `/new`, `/mode`, `/summary`, `/search`, `/save`, `/cards`, `/quiz`, `/review`, `/docs`, `/export`.
+`/start`, `/help`, `/profile`, `/status`, `/topics`, `/bind_topic <slug_or_name>`, `/create_default_topics`, `/new`, `/mode`, `/evidence`, `/summary`, `/search`, `/save`, `/cards`, `/quiz`, `/review`, `/today`, `/case`, `/case_answer`, `/docs`, `/export`.
+
+## Проверка "прямо в Telegram" с AI
+Короткий ответ: **да, это основной путь E2E-проверки** для этого проекта.
+
+Важно:
+1. Telegram-бот не может быть надежным "тестером" другого Telegram-бота как обычный пользовательский клиент. Для реалистичной проверки нужен обычный Telegram-аккаунт (человек), а не второй bot account.
+2. Если нужен отдельный изолированный тест-контур, лучше поднимать **второй экземпляр проекта с отдельным токеном бота**, а тестировать его с отдельного Telegram user.
+
+Рекомендуемый безопасный сценарий:
+1. Создать отдельный тестовый Telegram user (или взять второй личный аккаунт), добавить его ID в `ALLOWED_TELEGRAM_USER_IDS`.
+2. Опционально создать отдельного тестового бота через BotFather и подставить его токен в `TELEGRAM_BOT_TOKEN` для staging-контура.
+3. Запустить backend + polling + worker.
+4. В Telegram пройти команды: `/start` -> `/help` -> `/status` -> `/profile` -> `/create_default_topics`.
+5. Создать отдельный topic/thread для теста и выполнить `/bind_topic pharmacology`, затем проверить учебный диалог, `/cards`, `/quiz`, `/review`, `/today`, `/export markdown`.
+6. Для safety-проверки отправить рискованный запрос по дозировке без данных пациента и убедиться, что бот просит уточнения или уходит в `needs_manual_check`-поведение.
+7. Зафиксировать результат теста: timestamp, thread id, ожидаемое/фактическое поведение, provider/model (если видны в логах).
+
+Минимальный smoke-набор команд в чате:
+- `/start`
+- `/status`
+- `/create_default_topics`
+- `/bind_topic pharmacology`
+- `/new`
+- текстовый вопрос по фармакологии
+- `/cards`
+- `/quiz`
+- `/review`
+- `/export markdown`
 
 ## E2E Test Plan
 

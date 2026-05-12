@@ -78,7 +78,7 @@ def _check_token(request: Request, authorization: str | None = Header(default=No
     try:
         validate_session_token(token, secret=settings.web_session_secret)
     except ValueError as exc:
-        raise HTTPException(status_code=401, detail=f"Invalid session token: {exc}") from exc
+        raise HTTPException(status_code=401, detail="Invalid session token") from exc
     return token
 
 
@@ -100,6 +100,8 @@ def _get_current_user(
 ) -> User:
     token = _check_token(request, authorization)
     settings = get_settings()
+    if x_user_telegram_id is not None and x_user_telegram_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid Telegram user id")
     token_tg_user: int | None = None
     token_role: str | None = None
     is_static_owner_token = token == settings.web_owner_token

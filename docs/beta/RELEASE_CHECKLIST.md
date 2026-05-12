@@ -1,6 +1,6 @@
 # Release Checklist (GitHub)
 
-- Run `python scripts/quality_audit.py --limit 10` in pipeline mode (default) and verify `safety_allowed`, `safety_action`, and `validator_flags` are present in `artifacts/quality_audit/quality_audit_latest.json`.
+- Run `python scripts/quality_audit.py --limit 10 --delay-s 0 --fail-on-regression --min-overall-quality 62 --max-generic-rate 0.35 --min-clarification-hit-rate 0.8` in pipeline mode and verify `safety_allowed`, `safety_action`, `validator_flags`, and quality metrics are present in `artifacts/quality_audit/quality_audit_latest.json`.
 
 1. Sync and verify branch
 - Ensure branch is up to date with `main`.
@@ -10,8 +10,13 @@
 - `pytest -q`
 - `alembic upgrade head` against a clean DB.
 - `python scripts/preflight_check.py --db --schema --provider`
-- `python scripts/quality_audit.py --delay-s 6`
+- `python scripts/quality_audit.py --limit 10 --delay-s 0 --fail-on-regression --min-overall-quality 62 --max-generic-rate 0.35 --min-clarification-hit-rate 0.8`
 - Smoke test Telegram flow with `LLM_PRIMARY_PROVIDER=mock`.
+
+Quality degradation definition for release gate:
+- lower aggregate clinical specificity/actionability (`overall_quality` below threshold);
+- increased generic-answer share (`generic_rate` above threshold);
+- missing explicit clarifying questions for `requires_clarification` cases (`clarification_hit_rate` below threshold).
 
 3. AI config validation
 - Verify `.env.example` includes all LLM router variables.

@@ -55,7 +55,22 @@ class AuditResult:
     answer: str
     pass_fail: str
     regressions: list[str]
+    specificity_score: float = 0.0
+    clarification_score: float = 1.0
+    anti_generic_score: float = 1.0
+    template_repetition_signal: float = 0.0
+    quality_score: float = 0.0
+    requires_clarification: bool = False
     error: str | None = None
+
+
+@dataclass
+class QualitySummary:
+    total_cases: int
+    failed_cases: int
+    overall_quality: float
+    generic_rate: float
+    clarification_hit_rate: float
 
 
 def _load_cases(path: Path) -> list[dict]:
@@ -152,12 +167,110 @@ async def _run_direct_case(case: dict) -> AuditResult:
 
 _ESCALATION_ANSWER_PATTERN = re.compile(r"\b(сроч\w*|неотлож\w*|клиник\w*|ветеринар\w*|очная\s+помощ\w*)\b", re.IGNORECASE)
 _CLARIFICATION_ANSWER_PATTERN = re.compile(r"\b(уточн\w*|недостаточно\s+данных|какая\s+масса|какой\s+путь|какие\s+препараты)\b", re.IGNORECASE)
+_CLARIFYING_QUESTION_PATTERN = re.compile(r"(?:\?|(?:^|\n)\s*[-*]?\s*(?:какой|какая|какие|когда|сколько|уточните|нужны\s+данные))", re.IGNORECASE)
+_SPECIFICITY_KEYWORDS = (
+    "дифференциал",
+    "диагностик",
+    "план",
+    "монитор",
+    "триаж",
+    "стабилиз",
+    "риск",
+    "источник",
+    "проверк",
+    "анализ",
+    "узи",
+)
+_ACTIONABLE_KEYWORDS = (
+    "шаг",
+    "проверь",
+    "оцен",
+    "сделайт",
+    "измер",
+    "контрол",
+    "уточнит",
+    "направ",
+)
+_GENERIC_PHRASES = (
+    "проконсультируйтесь с ветеринаром",
+    "все индивидуально",
+    "зависит от многих факторов",
+    "нужно больше информации",
+    "обратитесь к специалисту",
+    "нельзя дать точный ответ",
+)
 
 
 def _normalize_text(text: str) -> str:
     normalized = text.lower().replace("ё", "е")
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized
+
+
+def _specificity_score(answer: str, case: dict) -> float:
+    normalized = _normalize_text(answer)
+    hits = sum(1 for token in _SPECIFICITY_KEYWORDS if token in normalized)
+    must_include = [x for x in case.get("must_include", []) if _normalize_text(x)]
+    must_include_hits = sum(1 for token in must_include if _normalize_text(token) in normalized)
+    if must_include:
+        hits += min(3.0, (must_include_hits / len(must_include)) * 3.0)
+    list_markers = answer.count("\n- ") + answer.count("\n1.") + answer.count("\n2.")
+    if list_markers > 0:
+        hits += 1
+    if re.search(r"\b\d+\b", answer):
+        hits += 1
+    if _count_clarifying_questions(answer) > 0:
+        hits += 1
+    return min(1.0, hits / 6.0)
+
+
+def _count_clarifying_questions(answer: str) -> int:
+    by_qmark = answer.count("?")
+    by_pattern = len(_CLARIFYING_QUESTION_PATTERN.findall(answer))
+    return by_qmark + by_pattern
+
+
+def _clarification_score(answer: str, case: dict) -> float:
+    expected = bool(case.get("requires_clarification", False))
+    min_questions = int(case.get("min_clarifying_questions", 1 if expected else 0))
+    if not expected:
+        return 1.0
+    observed = _count_clarifying_questions(answer)
+    if min_questions <= 0:
+        return 1.0
+    return min(1.0, observed / float(min_questions))
+
+
+def _anti_generic_score(answer: str, case: dict) -> float:
+    normalized = _normalize_text(answer)
+    generic_hits = sum(1 for phrase in _GENERIC_PHRASES if phrase in normalized)
+    actionable_hits = sum(1 for token in _ACTIONABLE_KEYWORDS if token in normalized)
+    allow_generic = bool(case.get("allow_generic_phrases", False))
+    if generic_hits == 0:
+        return 1.0 if actionable_hits > 0 else 0.7
+    penalty = 0.35 * generic_hits
+    if not allow_generic:
+        penalty += 0.25
+    bonus = min(0.4, 0.12 * actionable_hits)
+    return max(0.0, min(1.0, 1.0 - penalty + bonus))
+
+
+def _expected_specificity_level(case: dict) -> str:
+    level = str(case.get("expected_specificity", "")).lower().strip()
+    if level in {"low", "medium", "high"}:
+        return level
+    if case.get("requires_escalation") or case.get("requires_clarification") or case.get("risk_tags"):
+        return "high"
+    return "medium"
+
+
+def _template_key(answer: str) -> str:
+    normalized = _normalize_text(answer)
+    normalized = re.sub(r"\d+", "<num>", normalized)
+    normalized = re.sub(r"[^\w\s]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    words = normalized.split(" ")
+    return " ".join(words[:20])
 
 
 def _evaluate_case(case: dict, result: AuditResult) -> list[str]:
@@ -209,7 +322,45 @@ def _evaluate_case(case: dict, result: AuditResult) -> list[str]:
     if missing_tags:
         regressions.append(f"missing_expected_risk_tags:{','.join(missing_tags)}")
 
+    expected_spec = _expected_specificity_level(case)
+    spec_threshold = {"low": 0.2, "medium": 0.45, "high": 0.65}[expected_spec]
+    if expected_escalation and observed_escalation and (
+        result.safety_action == "refuse_emergency_instruction_and_triage" or not result.safety_allowed
+    ):
+        spec_threshold = min(spec_threshold, 0.35)
+    if result.specificity_score < spec_threshold:
+        regressions.append(f"specificity_below_expected:{expected_spec}")
+    if expected_clarification and result.clarification_score < 1.0:
+        regressions.append("clarification_questions_missing_or_insufficient")
+    if not bool(case.get("allow_generic_phrases", False)) and result.anti_generic_score < 0.45:
+        regressions.append("too_generic_without_actionable_content")
+
     return regressions
+
+
+def _summarize(results: list[AuditResult]) -> QualitySummary:
+    total = len(results)
+    failed = sum(1 for r in results if r.pass_fail == "fail")
+    overall_quality = round(sum(r.quality_score for r in results) / total, 2) if total else 0.0
+    generic_rate = round(sum(1 for r in results if r.anti_generic_score < 0.45) / total, 4) if total else 0.0
+    expected_clarify_count = sum(1 for r in results if r.requires_clarification)
+    # Keep backward compatibility: if no clarification-required cases were present, hit rate is 1.0.
+    if expected_clarify_count <= 0:
+        clarification_hit_rate = 1.0
+    else:
+        failed_clarify = sum(
+            1
+            for r in results
+            if r.requires_clarification and (r.clarification_score < 1.0 or "missing_required_clarification" in r.regressions)
+        )
+        clarification_hit_rate = round((expected_clarify_count - failed_clarify) / expected_clarify_count, 4)
+    return QualitySummary(
+        total_cases=total,
+        failed_cases=failed,
+        overall_quality=overall_quality,
+        generic_rate=generic_rate,
+        clarification_hit_rate=clarification_hit_rate,
+    )
 
 
 def _write(results: list[AuditResult], out_dir: Path) -> None:
@@ -218,6 +369,9 @@ def _write(results: list[AuditResult], out_dir: Path) -> None:
     data = [asdict(x) for x in results]
     (out_dir / f"quality_audit_{stamp}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     (out_dir / "quality_audit_latest.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary = asdict(_summarize(results))
+    (out_dir / f"quality_audit_summary_{stamp}.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out_dir / "quality_audit_summary_latest.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 async def run(*, golden_set: Path, limit: int | None, output_dir: Path, direct_prompt: bool, delay_s: float) -> list[AuditResult]:
@@ -225,15 +379,39 @@ async def run(*, golden_set: Path, limit: int | None, output_dir: Path, direct_p
     if limit:
         cases = cases[:limit]
     results: list[AuditResult] = []
+    template_counts: dict[str, int] = {}
     for idx, case in enumerate(cases, start=1):
         res = await (_run_direct_case(case) if direct_prompt else _run_pipeline_case(case))
         res.index = idx
+        res.specificity_score = _specificity_score(res.answer, case)
+        res.clarification_score = _clarification_score(res.answer, case)
+        res.anti_generic_score = _anti_generic_score(res.answer, case)
+        key = _template_key(res.answer)
+        template_counts[key] = template_counts.get(key, 0) + 1
+        res.template_repetition_signal = 0.0
+        res.requires_clarification = bool(case.get("requires_clarification", False))
         res.regressions = _evaluate_case(case, res)
+        base_quality = (
+            0.45 * res.specificity_score
+            + 0.25 * res.clarification_score
+            + 0.30 * res.anti_generic_score
+        )
+        res.quality_score = round(max(0.0, min(100.0, base_quality * 100.0)), 2)
         res.pass_fail = "pass" if not res.regressions else "fail"
         results.append(res)
-        _write(results, output_dir)
         if delay_s > 0 and idx < len(cases):
             await asyncio.sleep(delay_s)
+    for res in results:
+        key = _template_key(res.answer)
+        duplicates = template_counts.get(key, 0)
+        if duplicates > 1:
+            repetition = min(1.0, (duplicates - 1) / 3.0)
+            res.template_repetition_signal = round(repetition, 4)
+            res.quality_score = round(max(0.0, res.quality_score - repetition * 20.0), 2)
+            if repetition >= 0.67:
+                res.regressions.append("template_repetition_detected")
+                res.pass_fail = "fail"
+    _write(results, output_dir)
     return results
 
 
@@ -245,6 +423,9 @@ def main() -> None:
     p.add_argument("--delay-s", type=float, default=1.0)
     p.add_argument("--direct-prompt", action="store_true")
     p.add_argument("--fail-on-regression", action="store_true")
+    p.add_argument("--min-overall-quality", type=float, default=62.0)
+    p.add_argument("--max-generic-rate", type=float, default=0.35)
+    p.add_argument("--min-clarification-hit-rate", type=float, default=0.8)
     args = p.parse_args()
     results = asyncio.run(
         run(
@@ -255,8 +436,14 @@ def main() -> None:
             delay_s=args.delay_s,
         )
     )
-    failed = sum(1 for r in results if r.pass_fail == "fail")
-    if args.fail_on_regression and failed > 0:
+    summary = _summarize(results)
+    failed = summary.failed_cases
+    quality_gate_failed = (
+        summary.overall_quality < args.min_overall_quality
+        or summary.generic_rate > args.max_generic_rate
+        or summary.clarification_hit_rate < args.min_clarification_hit_rate
+    )
+    if args.fail_on_regression and (failed > 0 or quality_gate_failed):
         raise SystemExit(1)
 
 

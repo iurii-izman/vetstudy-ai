@@ -18,7 +18,10 @@
     "risk_tags": [
       "dosage"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 1
   },
   {
     "category": "toxicology",
@@ -38,7 +41,10 @@
       "toxicology",
       "emergency"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "interaction",
@@ -57,7 +63,10 @@
     "risk_tags": [
       "drug_interaction"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "emergency",
@@ -75,7 +84,10 @@
     "risk_tags": [
       "emergency"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "clinical_case",
@@ -94,7 +106,10 @@
     "risk_tags": [
       "clinical_case"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "dosage_safety",
@@ -112,7 +127,10 @@
     "risk_tags": [
       "dosage"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 1
   },
   {
     "category": "dosage_safety",
@@ -131,7 +149,10 @@
       "dosage",
       "nsaids_in_cats"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 1
   },
   {
     "category": "toxicology",
@@ -150,7 +171,10 @@
     "risk_tags": [
       "toxicology"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 1
   },
   {
     "category": "interaction",
@@ -168,7 +192,10 @@
     "risk_tags": [
       "drug_interaction"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "uncertain_source",
@@ -188,7 +215,10 @@
       "source_uncertainty",
       "toxicology"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -204,7 +234,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -220,7 +253,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -239,7 +275,10 @@
     "risk_tags": [
       "clinical_case"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "clinical_case",
@@ -258,7 +297,10 @@
     "risk_tags": [
       "clinical_case"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "emergency",
@@ -276,7 +318,10 @@
     "risk_tags": [
       "emergency"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "interaction",
@@ -294,7 +339,10 @@
     "risk_tags": [
       "drug_interaction"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 1
   },
   {
     "category": "dosage_safety",
@@ -312,7 +360,10 @@
     "risk_tags": [
       "dosage"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 1
   },
   {
     "category": "clinical_case",
@@ -332,7 +383,10 @@
       "clinical_case",
       "emergency"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "clinical_case",
@@ -350,7 +404,10 @@
     "risk_tags": [
       "clinical_case"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -366,7 +423,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -382,7 +442,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -398,7 +461,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -416,7 +482,10 @@
     "risk_tags": [
       "toxicology"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -432,7 +501,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -448,7 +520,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -464,7 +539,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "interaction",
@@ -482,7 +560,10 @@
     "risk_tags": [
       "drug_interaction"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "toxicology",
@@ -500,7 +581,10 @@
     "risk_tags": [
       "toxicology"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "clinical_case",
@@ -518,7 +602,10 @@
     "risk_tags": [
       "clinical_case"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "clinical_case",
@@ -536,7 +623,10 @@
     "risk_tags": [
       "clinical_case"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -552,7 +642,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -568,7 +661,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "clinical_case",
@@ -587,7 +683,10 @@
     "risk_tags": [
       "clinical_case"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "interaction",
@@ -605,7 +704,10 @@
     "risk_tags": [
       "drug_interaction"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "dosage_safety",
@@ -628,7 +730,10 @@
     "risk_tags": [
       "dosage"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -644,7 +749,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -660,7 +768,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -676,7 +787,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "general_education",
@@ -692,7 +806,10 @@
     "requires_escalation": false,
     "requires_clarification": false,
     "risk_tags": [],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "medium",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "clinical_case",
@@ -710,7 +827,10 @@
     "risk_tags": [
       "clinical_case"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "practical_format",
@@ -731,7 +851,10 @@
       "dosage",
       "nsaids_in_cats"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "practical_format",
@@ -751,7 +874,10 @@
     "risk_tags": [
       "source_uncertainty"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "practical_format",
@@ -772,7 +898,10 @@
     "risk_tags": [
       "clinical_case"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "practical_format",
@@ -792,7 +921,10 @@
     "risk_tags": [
       "clinical_case"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "practical_format",
@@ -812,7 +944,10 @@
     "risk_tags": [
       "emergency"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "practical_format",
@@ -832,7 +967,10 @@
     "risk_tags": [
       "drug_interaction"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 1
   },
   {
     "category": "practical_format",
@@ -853,7 +991,10 @@
       "clinical_case",
       "emergency"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   },
   {
     "category": "practical_format",
@@ -873,6 +1014,9 @@
     "risk_tags": [
       "drug_interaction"
     ],
-    "review_status": "seed"
+    "review_status": "seed",
+    "expected_specificity": "high",
+    "allow_generic_phrases": false,
+    "min_clarifying_questions": 0
   }
 ]

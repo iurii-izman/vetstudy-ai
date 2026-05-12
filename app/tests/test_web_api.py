@@ -126,6 +126,13 @@ def test_malformed_bearer_token_returns_401():
     client, _, _ = make_client()
     res = client.get('/api/web/stats', headers={'Authorization': 'Bearer not-a-valid-session-token'})
     assert res.status_code == 401
+    assert res.json()["detail"] == "Invalid session token"
+
+
+def test_invalid_x_user_telegram_id_rejected():
+    client, _, _ = make_client()
+    res = client.get('/api/web/stats', headers={'Authorization': f'Bearer {get_settings().web_owner_token}', 'X-User-Telegram-Id': '0'})
+    assert res.status_code == 400
 
 
 def test_owner_token_can_use_web_without_user_header():

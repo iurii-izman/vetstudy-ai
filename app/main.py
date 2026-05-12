@@ -13,7 +13,6 @@ from app.config import get_settings
 from app.db.models import Subject
 from app.db.session import new_session
 from app.errors import UserVisibleError
-from app.media.jobs import start_worker, stop_worker
 from app.observability import RequestContextMiddleware, configure_logging, safe_user_id
 from app.telegram.bot import dp, get_bot, setup_bot_commands
 from app.web import router as web_router
@@ -58,8 +57,6 @@ def seed_subjects():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     seed_subjects()
-    if settings.redis_url:
-        start_worker()
     bot = get_bot()
     try:
         await setup_bot_commands(bot)
@@ -71,7 +68,6 @@ async def lifespan(app: FastAPI):
     if settings.telegram_mode == "webhook":
         bot = get_bot()
         await bot.delete_webhook(drop_pending_updates=False)
-    await stop_worker()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

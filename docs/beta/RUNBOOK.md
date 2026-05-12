@@ -9,6 +9,7 @@
 
 ## 2. Deploy and verification
 - Apply migrations first, then deploy app and worker.
+- Keep media worker as a dedicated process/service; do not rely on bot polling process to start indexing workers.
 - Verify `GET /health` and `GET /ready`.
 - Verify `/api/web/auth/session` login and `/api/web/auth/refresh` rotation.
 - Verify `/api/web/admin/metrics/providers` and `/api/web/admin/alerts/unanswered`.

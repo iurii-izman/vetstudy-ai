@@ -14,7 +14,7 @@ VetStudy AI is a Telegram-first educational assistant for veterinary study, virt
 
 ## Product Surface
 
-- Telegram commands: `/start`, `/help`, `/topics`, `/bind_topic`, `/create_default_topics`, `/new`, `/mode`, `/summary`, `/search`, `/save`, `/cards`, `/quiz`, `/review`, `/docs`, `/export`
+- Telegram commands: `/start`, `/help`, `/profile`, `/status`, `/topics`, `/bind_topic`, `/create_default_topics`, `/new`, `/mode`, `/evidence`, `/summary`, `/search`, `/save`, `/cards`, `/quiz`, `/review`, `/today`, `/case`, `/case_answer`, `/docs`, `/export`
 - Learning memory: user-scoped notes, summaries, saved answers, search, Anki/Markdown exports
 - Flashcards: generation, spaced-review actions, review event tracking
 - Documents: TXT/MD/PDF/DOCX extraction and Redis-backed indexing jobs
@@ -79,6 +79,8 @@ Document worker:
 python -m app.media.worker
 ```
 
+Note: `app.run_polling` no longer starts the media worker in-process. Run worker as a separate process/service.
+
 Frontend:
 
 ```bash
@@ -132,10 +134,11 @@ Beta preflight:
 
 ```bash
 python scripts/preflight_check.py --db --schema --provider
-python scripts/quality_audit.py
+python scripts/quality_audit.py --limit 10 --delay-s 0 --fail-on-regression --min-overall-quality 62 --max-generic-rate 0.35 --min-clarification-hit-rate 0.8
 python scripts/project_scorecard.py --database-url "$DATABASE_URL"
 ```
 
+Quality degradation is treated as CI-failing when answers become too generic, omit required clarifying questions, or lose expected clinical specificity for the golden cases.  
 The quality audit writes generated review artifacts under `artifacts/quality_audit/`; those files are intentionally ignored.
 
 ## Environment
@@ -150,6 +153,7 @@ Required for beta:
 - `WEB_OWNER_PASSWORD_HASH` or `WEB_OWNER_PASSWORD`
 - `WEB_OWNER_TOKEN`
 - `WEB_SESSION_SECRET`
+- dual-risk routing variables: `LLM_LOW_RISK_PROVIDER`, `LLM_LOW_RISK_MODEL`, `LLM_HIGH_RISK_PROVIDER`, `LLM_HIGH_RISK_MODEL`
 - at least one provider key: `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, or `GEMINI_API_KEY`
 
 Recommended:

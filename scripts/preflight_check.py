@@ -29,6 +29,8 @@ def _secret_ready(value: str, *, min_len: int = 16) -> bool:
         return False
     if normalized in {"change-me", "vetstudy-owner", "vetstudy-local-token"}:
         return False
+    if "change-me" in normalized:
+        return False
     return not any(marker in normalized for marker in ("replace-with", "example", "placeholder", "long-random"))
 
 
