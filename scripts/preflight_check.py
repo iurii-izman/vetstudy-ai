@@ -58,19 +58,52 @@ def check_env() -> list[tuple[str, str]]:
         "gemini": settings.gemini_api_key,
         "mock": "mock",
     }
-    primary_key = provider_keys.get(settings.llm_primary_provider, "")
-    fallback_key = provider_keys.get(settings.llm_fallback_provider, "")
-    embeddings_key = provider_keys.get(settings.llm_embeddings_provider, "")
-    rows.append(_ok(f"primary provider configured: {settings.llm_primary_provider}") if primary_key else _fail(f"missing key for primary provider: {settings.llm_primary_provider}"))
-    rows.append(_ok(f"fallback provider configured: {settings.llm_fallback_provider}") if fallback_key else _warn(f"missing key for fallback provider: {settings.llm_fallback_provider}"))
-    if settings.llm_primary_provider == "mock":
-        rows.append(_fail("LLM_PRIMARY_PROVIDER=mock is not suitable for content beta"))
-    if settings.app_env == "prod" and settings.llm_embeddings_provider.lower() == "mock":
-        rows.append(_fail("LLM_EMBEDDINGS_PROVIDER=mock is not allowed in APP_ENV=prod"))
-    elif settings.app_env == "prod" and not embeddings_key:
-        rows.append(_fail(f"missing key for embeddings provider: {settings.llm_embeddings_provider}"))
+    known_providers = {"openai", "openrouter", "groq", "gemini", "mock"}
+    primary_provider = settings.llm_primary_provider.strip().lower()
+    fallback_provider = settings.llm_fallback_provider.strip().lower()
+    embeddings_provider = settings.llm_embeddings_provider.strip().lower()
+    primary_key = provider_keys.get(primary_provider, "")
+    fallback_key = provider_keys.get(fallback_provider, "")
+    embeddings_key = provider_keys.get(embeddings_provider, "")
+
+    if primary_provider not in known_providers:
+        rows.append(_fail(f"unknown primary provider: {settings.llm_primary_provider} (allowed: {', '.join(sorted(known_providers))})"))
     else:
-        rows.append(_ok(f"embeddings provider configured: {settings.llm_embeddings_provider}"))
+        rows.append(
+            _ok(f"primary provider configured: {primary_provider}")
+            if primary_key
+            else _fail(f"missing key for primary provider: {primary_provider}")
+        )
+    if fallback_provider not in known_providers:
+        rows.append(_fail(f"unknown fallback provider: {settings.llm_fallback_provider} (allowed: {', '.join(sorted(known_providers))})"))
+    else:
+        rows.append(
+            _ok(f"fallback provider configured: {fallback_provider}")
+            if fallback_key
+            else _warn(f"missing key for fallback provider: {fallback_provider}")
+        )
+
+    if primary_provider == "mock":
+        rows.append(_fail("LLM_PRIMARY_PROVIDER=mock is not suitable for content beta"))
+
+    if embeddings_provider not in known_providers:
+        rows.append(_fail(f"unknown embeddings provider: {settings.llm_embeddings_provider} (allowed: {', '.join(sorted(known_providers))})"))
+    elif settings.app_env == "prod":
+        if embeddings_provider == "mock":
+            rows.append(_fail("APP_ENV=prod requires LLM_EMBEDDINGS_PROVIDER to be non-mock (openai|openrouter|groq|gemini)"))
+        elif not settings.llm_embeddings_model.strip():
+            rows.append(_fail("APP_ENV=prod requires LLM_EMBEDDINGS_MODEL to be set for the selected embeddings provider"))
+        elif not embeddings_key:
+            rows.append(_fail(f"APP_ENV=prod missing API key for embeddings provider: {embeddings_provider}"))
+        else:
+            rows.append(_ok(f"embeddings provider configured for prod: {embeddings_provider}/{settings.llm_embeddings_model}"))
+    else:
+        if embeddings_provider == "mock":
+            rows.append(_warn("embeddings provider is mock (allowed outside APP_ENV=prod)"))
+        elif not embeddings_key:
+            rows.append(_warn(f"missing key for embeddings provider: {embeddings_provider}"))
+        else:
+            rows.append(_ok(f"embeddings provider configured: {embeddings_provider}"))
     return rows
 
 

@@ -1,6 +1,7 @@
 # Release Checklist (GitHub)
 
 - Run `python scripts/quality_audit.py --limit 10 --delay-s 0 --fail-on-regression --min-overall-quality 62 --max-generic-rate 0.35 --min-clarification-hit-rate 0.8` in pipeline mode and verify `safety_allowed`, `safety_action`, `validator_flags`, and quality metrics are present in `artifacts/quality_audit/quality_audit_latest.json`.
+- Verify nightly workflow `Nightly Quality Audit` succeeds on the full current golden set and uploads `artifacts/quality_audit/*` artifacts.
 
 1. Sync and verify branch
 - Ensure branch is up to date with `main`.
@@ -22,6 +23,7 @@ Quality degradation definition for release gate:
 - Verify `.env.example` includes all LLM router variables.
 - Validate at least one production provider key is set in deployment secrets.
 - Confirm fallback provider/model configured.
+- For `APP_ENV=prod`, confirm embeddings preflight requirements: non-mock provider, model set, matching provider key.
 
 4. Observability and cost safety
 - Confirm `model_calls` rows are being written for each AI request.
@@ -42,3 +44,4 @@ Quality degradation definition for release gate:
 - Send one Telegram test prompt and verify fallback behavior by disabling primary key.
 - Validate session auth flow: `/api/web/auth/session` + `/api/web/auth/refresh`.
 - Follow `docs/beta/RUNBOOK.md` for backup restore drill and rollback rehearsal.
+- Run `python scripts/restore_verify.py --database-url "$DATABASE_URL"` and keep output in release notes.

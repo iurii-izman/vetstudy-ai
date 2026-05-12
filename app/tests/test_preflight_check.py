@@ -23,7 +23,7 @@ def test_preflight_fails_when_mock_embeddings_in_prod(monkeypatch):
     monkeypatch.setattr(preflight, "get_settings", lambda: settings)
 
     rows = preflight.check_env()
-    assert ("fail", "LLM_EMBEDDINGS_PROVIDER=mock is not allowed in APP_ENV=prod") in rows
+    assert ("fail", "APP_ENV=prod requires LLM_EMBEDDINGS_PROVIDER to be non-mock (openai|openrouter|groq|gemini)") in rows
 
 
 def test_preflight_fails_when_embeddings_key_missing_in_prod(monkeypatch):
@@ -34,4 +34,14 @@ def test_preflight_fails_when_embeddings_key_missing_in_prod(monkeypatch):
     monkeypatch.setattr(preflight, "get_settings", lambda: settings)
 
     rows = preflight.check_env()
-    assert ("fail", "missing key for embeddings provider: openai") in rows
+    assert ("fail", "APP_ENV=prod missing API key for embeddings provider: openai") in rows
+
+
+def test_preflight_warns_when_embeddings_mock_outside_prod(monkeypatch):
+    settings = _settings()
+    settings.app_env = "dev"
+    settings.llm_embeddings_provider = "mock"
+    monkeypatch.setattr(preflight, "get_settings", lambda: settings)
+
+    rows = preflight.check_env()
+    assert ("warn", "embeddings provider is mock (allowed outside APP_ENV=prod)") in rows

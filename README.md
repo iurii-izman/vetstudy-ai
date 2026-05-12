@@ -55,6 +55,11 @@ curl http://localhost:8000/health
 curl http://localhost:8000/ready
 ```
 
+Web dashboard address:
+- API/health endpoints: `http://localhost:8000`
+- Frontend dev server (when running `cd web && npm run dev`): `http://localhost:5173`
+- `http://localhost:1455` is not used by this repository.
+
 For provider setup, use `docs/setup/FREE_API_SETUP.md`.
 
 Dual risk routing (beta default):
@@ -86,6 +91,12 @@ python -m app.media.worker
 ```
 
 Note: `app.run_polling` no longer starts the media worker in-process. Run worker as a separate process/service.
+Worker diagnostics (queue health/readiness):
+
+```bash
+python -m app.media.worker --diagnose
+python -m app.media.worker --diagnose --fail-on-stall
+```
 
 Frontend:
 
@@ -142,6 +153,7 @@ Beta preflight:
 python scripts/preflight_check.py --db --schema --provider
 python scripts/quality_audit.py --limit 10 --delay-s 0 --fail-on-regression --min-overall-quality 62 --max-generic-rate 0.35 --min-clarification-hit-rate 0.8
 python scripts/project_scorecard.py --database-url "$DATABASE_URL"
+python scripts/restore_verify.py --database-url "$DATABASE_URL"
 ```
 
 Quality degradation is treated as CI-failing when answers become too generic, omit required clarifying questions, or lose expected clinical specificity for the golden cases.  
@@ -161,7 +173,7 @@ Required for beta:
 - `WEB_SESSION_SECRET`
 - dual-risk routing variables: `LLM_LOW_RISK_PROVIDER`, `LLM_LOW_RISK_MODEL`, `LLM_HIGH_RISK_PROVIDER`, `LLM_HIGH_RISK_MODEL`
 - at least one provider key: `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, or `GEMINI_API_KEY`
-- for `APP_ENV=prod`, set a real embeddings provider/model (`LLM_EMBEDDINGS_PROVIDER != mock`)
+- for `APP_ENV=prod`, set non-mock `LLM_EMBEDDINGS_PROVIDER`, non-empty `LLM_EMBEDDINGS_MODEL`, and a matching provider API key
 
 Recommended:
 

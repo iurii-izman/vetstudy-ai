@@ -22,6 +22,21 @@ class FakeRedis:
     async def aclose(self):
         self.closed = True
 
+    async def xgroup_create(self, *_args, **_kwargs):
+        return True
+
+    async def xinfo_stream(self, _stream):
+        return {"length": 3}
+
+    async def xinfo_groups(self, _stream):
+        return [{"name": jobs.DEFAULT_GROUP, "consumers": 1, "pending": 2, "lag": 1, "last-delivered-id": "1-0"}]
+
+    async def xpending(self, _stream, _group):
+        return {"pending": 2, "min": "1-0", "max": "2-0", "consumers": [{"name": "c1", "pending": 2}]}
+
+    async def xpending_range(self, _stream, _group, _min, _max, _count):
+        return [{"message_id": "1-0", "consumer": "c1", "time_since_delivered": 12000, "times_delivered": 1}]
+
 
 @pytest.mark.asyncio
 async def test_enqueue_document_index_writes_redis_stream(monkeypatch):
@@ -96,3 +111,16 @@ async def test_handle_stream_message_acks_after_failure(monkeypatch):
 
 async def _async_append(target, value):
     target.append(value)
+
+
+@pytest.mark.asyncio
+async def test_worker_diagnostics_includes_pending_metrics(monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(jobs, "get_settings", lambda: SimpleNamespace(redis_url="redis://localhost:6379/0"))
+    monkeypatch.setattr(jobs, "redis_from_url", lambda *a, **k: redis)
+
+    info = await jobs.worker_diagnostics()
+
+    assert info["status"] == "ok"
+    assert info["pending_count"] == 2
+    assert info["oldest_pending_seconds"] == 12.0

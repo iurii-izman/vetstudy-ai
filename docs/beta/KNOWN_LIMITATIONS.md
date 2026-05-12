@@ -41,3 +41,7 @@ Product analytics cover activation, search, feedback, cards, review, and high-ri
 ## 10. Manual Beta Smoke Remains Required
 
 Real Telegram group permissions, topic binding, bot admin rights, and student allowlist confirmation require the owner. Autopilot cannot complete those checks without the actual beta environment.
+
+## 11. Restore Verify Requires Local Tooling
+
+`scripts/restore_verify.py` depends on local `docker`, `pg_dump`, and `pg_restore` binaries. In restricted environments without these tools, restore verification must run in CI/ops runners that provide them.
