@@ -170,6 +170,7 @@ def test_toxicology_permethrin_for_cat_detected():
     result = gate.check("Кошка слизала перметрин")
     assert result.intent == "toxicology"
     assert result.action == "ask_clarifying_questions"
+    assert "нейтральные" in (result.warning or "").lower()
 
 
 def test_interaction_phrase_without_plus_detected():
@@ -205,3 +206,20 @@ def test_disclaimers_present():
     result = gate.check("парацетамол кошке")
     assert result.disclaimers is not None
     assert len(result.disclaimers) == 3
+
+
+def test_emergency_romanian_phrase_escalates():
+    gate = SafetyGate()
+    result = gate.check("Pisica nu respira, urgenta")
+    assert result.intent == "emergency_or_red_flag"
+    assert result.action == "refuse_emergency_instruction_and_triage"
+    assert result.allowed is False
+
+
+def test_dosage_missing_data_has_explicit_numeric_refusal():
+    gate = SafetyGate()
+    result = gate.check("Дай дозу амоксициллина собаке")
+    assert result.intent == "dosage_request"
+    assert result.action == "ask_clarifying_questions"
+    assert result.allowed is False
+    assert "числов" in (result.warning or "").lower()

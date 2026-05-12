@@ -29,7 +29,7 @@ class SafetyResult:
 
 class SafetyGate:
     DOSAGE_PATTERN = re.compile(
-        r"\b(доз\w*|дозиров\w*|мг/кг|mg/kg|сколько\b.{0,50}\bдать|рассчита\w*\b.{0,50}\bдоз\w*)\b",
+        r"\b(доз\w*|дозиров\w*|doz\w*|мг/кг|mg/kg|сколько\b.{0,50}\bдать|рассчита\w*\b.{0,50}\bдоз\w*|cate\s+mg\s+kg|cita\s+mg\s+kg)\b",
         re.IGNORECASE,
     )
     CLINICAL_CASE_PATTERN = re.compile(
@@ -37,12 +37,15 @@ class SafetyGate:
         re.IGNORECASE,
     )
     EMERGENCY_PATTERN = re.compile(
-        r"\b(не\s+дыш\w*|судорог\w*|коллапс\w*|без\s+сознания|остановк[аи]\s+дыхания|сильн\w+\s+кровотеч\w*|анафилакс\w*|сроч\w*|реанимац\w*)\b",
+        r"\b(не\s+дыш\w*|nu\s+respir\w*|судорог\w*|convuls\w*|коллапс\w*|colaps\w*|без\s+сознания|inconstient\w*|остановк[аи]\s+дыхания|сильн\w+\s+кровотеч\w*|hemoragi\w*|анафилакс\w*|anafilax\w*|сроч\w*|urgent\w*|urgenta|реанимац\w*)\b",
         re.IGNORECASE,
     )
-    TOX_PATTERN = re.compile(r"\b(отрав\w*|токс\w*|яд\w*|парацетамол\w*|acetaminophen)\b", re.IGNORECASE)
+    TOX_PATTERN = re.compile(
+        r"\b(отрав\w*|intoxic\w*|токс\w*|toxic\w*|яд\w*|парацетамол\w*|acetaminophen)\b",
+        re.IGNORECASE,
+    )
     TOX_INGESTION_PATTERN = re.compile(
-        r"\b(шоколад\w*|изюм\w*|ксилит\w*|лук\w*|чеснок\w*|перметрин\w*|съел\w*|съела|слизал\w*|проглот\w*)\b",
+        r"\b(шоколад\w*|ciocolat\w*|изюм\w*|stafid\w*|ксилит\w*|xilit\w*|лук\w*|ceap\w*|чеснок\w*|usturoi\w*|перметрин\w*|съел\w*|съела|слизал\w*|проглот\w*|a\s+ingerat|a\s+lins|a\s+mancat)\b",
         re.IGNORECASE,
     )
     INTERACTION_PATTERN = re.compile(
@@ -100,7 +103,7 @@ class SafetyGate:
                 intent=intent,
                 risk_tags=risk_tags,
                 allowed=False,
-                warning="Подозрение на токсикологию: это опасно, есть токсикологический риск, требует проверки. Нужна срочная очная помощь и срочность оценки в клинике/с ветеринаром.",
+                warning="Подозрение на токсикологию: это опасно, есть токсикологический риск, требует проверки. Нужна срочная очная помощь и срочность оценки в клинике/с ветеринаром. Удаленно нельзя давать нейтральные или пошаговые домашние инструкции.",
                 clarifying_questions=self._build_toxicology_clarifying_questions(normalized),
                 disclaimers=self.DISCLAIMERS,
             )
@@ -113,7 +116,7 @@ class SafetyGate:
                     intent=intent,
                     risk_tags=risk_tags,
                     allowed=False,
-                    warning="Недостаточно данных для безопасного расчета дозы.",
+                    warning="Недостаточно данных для безопасного расчета дозы. Числовую дозировку (mg/kg, мг, мл) удаленно не даю до получения обязательных данных и проверки источника.",
                     clarifying_questions=questions,
                     disclaimers=self.DISCLAIMERS,
                 )
@@ -166,10 +169,10 @@ class SafetyGate:
     ]:
         if self.EMERGENCY_PATTERN.search(text):
             return "emergency_or_red_flag"
-        if self.DOSAGE_PATTERN.search(text):
-            return "dosage_request"
         if self.TOX_PATTERN.search(text) or self.TOX_INGESTION_PATTERN.search(text):
             return "toxicology"
+        if self.DOSAGE_PATTERN.search(text):
+            return "dosage_request"
         if self._looks_like_interaction(text):
             return "drug_interaction"
         if self.UNCERTAIN_SOURCE_PATTERN.search(text):
@@ -217,8 +220,6 @@ class SafetyGate:
             questions.append("Какое показание/диагноз для назначения?")
         if self._form_relevant(text) and not self.FORM_PATTERN.search(text):
             questions.append("Уточните форму и концентрацию препарата.")
-            questions.append("Нужно уточнение формы и концентрации.")
-            questions.append("Уточните концентрацию препарата.")
         if not self.ROUTE_PATTERN.search(text):
             questions.append("Какой путь введения (PO/SC/IM/IV)?")
         if self._pregnancy_relevant(text) and not self.PREGNANCY_PATTERN.search(text):
@@ -227,8 +228,7 @@ class SafetyGate:
             questions.append("Есть ли болезни почек/печени/сердца?")
         if not self.CURRENT_DRUGS_PATTERN.search(text):
             questions.append("Какие препараты животное уже получает сейчас?")
-            questions.append("Уточните текущие препараты.")
-        return questions
+        return self._dedupe_preserve_order(questions)
 
     @staticmethod
     def _age_relevant(text: str) -> bool:
@@ -259,7 +259,19 @@ class SafetyGate:
         ]
         if not self.CURRENT_DRUGS_PATTERN.search(text):
             questions.append("Какие препараты животное получает сейчас?")
-        return questions
+        return self._dedupe_preserve_order(questions)
+
+    @staticmethod
+    def _dedupe_preserve_order(values: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            key = item.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+        return out
 
     @staticmethod
     def _risk_warning_text(risk_tags: list[str]) -> str:

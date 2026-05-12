@@ -18,10 +18,19 @@ class PostGenerationValidator:
         r"\b(кг|kg|концентрац|мг/мл|mg/ml|внутрь|po|iv|im|sc|текущие препараты|принимает)\b",
         re.IGNORECASE,
     )
-    _EMERGENCY_PATTERN = re.compile(r"\b(не\s+дыш|без\s+сознания|судорог|коллапс|сильн\w+\s+кровотеч)\b", re.IGNORECASE)
+    _EMERGENCY_PATTERN = re.compile(r"\b(не\s+дыш\w*|без\s+сознания|судорог\w*|коллапс\w*|сильн\w+\s+кровотеч\w*)\b", re.IGNORECASE)
     _TRIAGE_PATTERN = re.compile(r"\b(сроч\w*|неотлож\w*|клиник\w*|ветеринар\w*)\b", re.IGNORECASE)
     _UNSAFE_HOME_PATTERN = re.compile(r"\b(дайте\s+дома|лечите\s+дома|подождите\s+дома)\b", re.IGNORECASE)
-    _TOX_PATTERN = re.compile(r"\b(парацетамол|acetaminophen|отрав\w*|токс\w*)\b", re.IGNORECASE)
+    _TOX_PATTERN = re.compile(
+        r"\b(парацетамол|acetaminophen|отрав\w*|токс\w*|шоколад\w*|изюм\w*|ксилит\w*|xylit\w*|лук\w*|чеснок\w*|перметрин\w*)\b",
+        re.IGNORECASE,
+    )
+    _HIGH_RISK_PATTERN = re.compile(
+        r"\b(доз|мг/кг|mg/kg|сколько\s+дать|отрав|токс|не\s+дыш|судорог|коллапс|взаимодейств|седац|анестез)\b",
+        re.IGNORECASE,
+    )
+    _OVERCONFIDENT_PATTERN = re.compile(r"\b(точно|гарантир\w*|абсолютно\s+безопасно|однозначно|без\s+риска|точный\s+диагноз)\b", re.IGNORECASE)
+    _HEDGE_OR_CHECK_PATTERN = re.compile(r"\b(вероятн\w*|может|нужно\s+провер|manual\s*check|требует\s+проверк|по\s+инструкц)\b", re.IGNORECASE)
     _INTERACTION_ASSERTIVE_PATTERN = re.compile(r"\b(нет\s+взаимодействий|взаимодействий\s+нет)\b", re.IGNORECASE)
     _INTERACTION_CHECK_PATTERN = re.compile(r"\b(провер|инструкц|справочник|формуляр)\b", re.IGNORECASE)
     _DOSAGE_SOURCE_PATTERN = re.compile(
@@ -41,24 +50,31 @@ class PostGenerationValidator:
 
         if (self._DOSAGE_CALC_PATTERN.search(q) or self._HAS_NUMERIC_DOSING.search(a)) and self._HAS_NUMERIC_DOSING.search(a) and not self._HAS_REQUIRED_DOSING_DATA.search(q):
             flags.append("dosage_missing_required_data")
-        if self._HAS_NUMERIC_DOSING.search(a) and not self._DOSAGE_SOURCE_PATTERN.search(a):
+        is_dosage_context = bool(self._DOSAGE_CALC_PATTERN.search(q) or self._HAS_NUMERIC_DOSING.search(a))
+        if is_dosage_context and not self._DOSAGE_SOURCE_PATTERN.search(a):
             flags.append("dosage_without_source_reference")
         if self._EMERGENCY_PATTERN.search(q):
             if not self._TRIAGE_PATTERN.search(a):
                 flags.append("emergency_no_escalation")
             if self._UNSAFE_HOME_PATTERN.search(a):
                 flags.append("emergency_unsafe_home_instruction")
+            if "триаж" not in a and "triage" not in a:
+                flags.append("emergency_missing_triage_marker")
         if self._TOX_PATTERN.search(q):
             if "токс" not in a and "отрав" not in a:
                 flags.append("toxicology_no_warning")
             if not self._TRIAGE_PATTERN.search(a):
                 flags.append("toxicology_no_escalation")
+            if "триаж" not in a and "triage" not in a:
+                flags.append("toxicology_missing_triage_marker")
         if "взаимодейств" in q and self._INTERACTION_ASSERTIVE_PATTERN.search(a) and not self._INTERACTION_CHECK_PATTERN.search(a):
             flags.append("drug_interaction_overconfident")
         if self._SOURCE_UNCERTAIN_PATTERN.search(q) and not self._SOURCE_CHECK_PATTERN.search(a):
             flags.append("source_uncertainty_not_marked")
         if self._DIAGNOSIS_CERTAINTY_PATTERN.search(a) and not self._EXAM_NEEDED_PATTERN.search(a):
             flags.append("medical_certainty_without_exam")
+        if self._HIGH_RISK_PATTERN.search(q) and self._OVERCONFIDENT_PATTERN.search(a) and not self._HEDGE_OR_CHECK_PATTERN.search(a):
+            flags.append("high_risk_overconfident_tone")
 
         if flags:
             rewritten = (

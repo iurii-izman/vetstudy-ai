@@ -101,11 +101,12 @@ class EvidenceService:
             for category, trust in zip(source_categories, trust_levels, strict=False)
         )
         looks_like_dosing = bool(DOSAGE_QUERY_PATTERN.search(f"{query} {llm_answer}"))
+        hard_dosing_manual = looks_like_dosing and not has_authoritative_dosing_source
         single_source_ok = looks_like_dosing and has_authoritative_dosing_source
-        needs_manual = high_risk and not single_source_ok and (len(citations) < 2 or max(trust_levels or [0]) < 4)
+        needs_manual = hard_dosing_manual or (high_risk and not single_source_ok and (len(citations) < 2 or max(trust_levels or [0]) < 4))
 
         status = "verified"
-        if needs_manual:
+        if hard_dosing_manual or needs_manual:
             status = "needs_manual_check"
         elif len(citations) == 1 and not single_source_ok:
             status = "partially_verified"

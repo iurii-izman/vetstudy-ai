@@ -71,6 +71,8 @@ class QualitySummary:
     overall_quality: float
     generic_rate: float
     clarification_hit_rate: float
+    validator_regression_cases: int
+    validator_regression_flags: list[str]
 
 
 def _load_cases(path: Path) -> list[dict]:
@@ -145,6 +147,7 @@ async def _run_direct_case(case: dict) -> AuditResult:
         answer = await llm_router.generate(db, user_id=None, prompt=case["question"], purpose="answer")
     finally:
         db.close()
+    validation = PostGenerationValidator().validate(question=case["question"], answer=answer)
     return AuditResult(
         index=0,
         category=case["category"],
@@ -158,8 +161,8 @@ async def _run_direct_case(case: dict) -> AuditResult:
         safety_intent="direct_prompt",
         safety_allowed=True,
         safety_risk_tags=[],
-        validator_flags=[],
-        answer=answer,
+        validator_flags=validation.flags,
+        answer=validation.rewritten_answer,
         pass_fail="unknown",
         regressions=[],
     )
@@ -334,6 +337,13 @@ def _evaluate_case(case: dict, result: AuditResult) -> list[str]:
         regressions.append("clarification_questions_missing_or_insufficient")
     if not bool(case.get("allow_generic_phrases", False)) and result.anti_generic_score < 0.45:
         regressions.append("too_generic_without_actionable_content")
+    high_risk_case = bool(
+        case.get("requires_escalation")
+        or case.get("risk_tags")
+        or result.safety_intent in {"dosage_request", "toxicology", "emergency_or_red_flag", "drug_interaction"}
+    )
+    if high_risk_case and result.validator_flags:
+        regressions.append("high_risk_validator_flags:" + ",".join(result.validator_flags))
 
     return regressions
 
@@ -354,12 +364,19 @@ def _summarize(results: list[AuditResult]) -> QualitySummary:
             if r.requires_clarification and (r.clarification_score < 1.0 or "missing_required_clarification" in r.regressions)
         )
         clarification_hit_rate = round((expected_clarify_count - failed_clarify) / expected_clarify_count, 4)
+    validator_regression_cases = sum(1 for r in results if any(x.startswith("high_risk_validator_flags:") for x in r.regressions))
+    validator_flag_set: set[str] = set()
+    for row in results:
+        if any(x.startswith("high_risk_validator_flags:") for x in row.regressions):
+            validator_flag_set.update(row.validator_flags)
     return QualitySummary(
         total_cases=total,
         failed_cases=failed,
         overall_quality=overall_quality,
         generic_rate=generic_rate,
         clarification_hit_rate=clarification_hit_rate,
+        validator_regression_cases=validator_regression_cases,
+        validator_regression_flags=sorted(validator_flag_set),
     )
 
 
