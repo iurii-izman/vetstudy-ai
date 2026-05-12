@@ -34,8 +34,12 @@ class EvidenceResponse:
     short_answer: str
     evidence_bullets: list[str]
     citations: list[str]
+    trust_indicators: list[str]
+    verification_status: str
     status: str
     needs_manual_check: bool
+    manual_check_reasons: list[str]
+    next_questions: list[str]
 
 
 class EvidenceService:
@@ -70,20 +74,30 @@ class EvidenceService:
                 short_answer="не подтверждено источником",
                 evidence_bullets=["Подходящий фрагмент в curated library не найден."],
                 citations=[],
+                trust_indicators=["src:mixed | trust:low | verify:missing"],
+                verification_status="missing",
                 status="needs_manual_check",
                 needs_manual_check=True,
+                manual_check_reasons=["Нет релевантного подтвержденного источника в curated library."],
+                next_questions=[
+                    "Какой точный препарат/действующее вещество?",
+                    "Вид, вес, возраст и ключевые симптомы пациента?",
+                ],
             )
 
         evidence_bullets: list[str] = []
         citations: list[str] = []
+        trust_indicators: list[str] = []
         trust_levels: list[int] = []
         source_categories: list[str] = []
+        source_classes: list[str] = []
         for item in retrieved[:4]:
             ref = str(item.chunk_id or item.memory_id or "").strip()
             title = str(item.source_title or "").strip() or "Untitled source"
             source = self._source_for_title(sources, title)
             trust = int(source.get("trust_level", 2)) if source else 2
             category = str(source.get("category", "")) if source else ""
+            source_class = self._source_class_for_category(category)
             snippet = self._normalize_line(str(item.snippet or ""))
             citation = self._format_citation(title=title, ref=ref)
             if snippet:
@@ -92,6 +106,14 @@ class EvidenceService:
                 citations.append(citation)
                 trust_levels.append(trust)
                 source_categories.append(category)
+                source_classes.append(source_class)
+                trust_indicators.append(
+                    self._format_trust_indicator(
+                        source_class=source_class,
+                        trust_bucket=self._trust_bucket(trust),
+                        verification_status="draft",
+                    )
+                )
 
         evidence_bullets = self._dedupe_lines(evidence_bullets)
         citations = self._dedupe_lines(citations)
@@ -104,19 +126,46 @@ class EvidenceService:
         hard_dosing_manual = looks_like_dosing and not has_authoritative_dosing_source
         single_source_ok = looks_like_dosing and has_authoritative_dosing_source
         needs_manual = hard_dosing_manual or (high_risk and not single_source_ok and (len(citations) < 2 or max(trust_levels or [0]) < 4))
+        partially_verified = len(citations) == 1 and not single_source_ok
 
         status = "verified"
         if hard_dosing_manual or needs_manual:
             status = "needs_manual_check"
-        elif len(citations) == 1 and not single_source_ok:
+        elif partially_verified:
             status = "partially_verified"
+        verification_status = status
+        manual_check_reasons: list[str] = []
+        if hard_dosing_manual:
+            manual_check_reasons.append("Для дозировки не найден authoritative source (label/SPC или licensed formulary).")
+        if high_risk and len(citations) < 2 and not single_source_ok:
+            manual_check_reasons.append("High-risk сценарий подтвержден слишком малым числом источников.")
+        if high_risk and max(trust_levels or [0]) < 4 and not single_source_ok:
+            manual_check_reasons.append("High-risk сценарий без достаточного уровня доверия к источнику.")
+        if not manual_check_reasons and status == "needs_manual_check":
+            manual_check_reasons.append("Требуется ручная клиническая проверка по safety-политике.")
+        next_questions: list[str] = []
+        if status in {"needs_manual_check", "partially_verified"}:
+            next_questions = [
+                "Уточните вид, вес, возраст и ключевые симптомы.",
+                "Уточните точный препарат/концентрацию/маршрут и региональную доступность.",
+            ]
+        trust_indicators = self._finalize_trust_indicators(
+            trust_indicators=trust_indicators,
+            source_classes=source_classes,
+            trust_levels=trust_levels,
+            verification_status=verification_status,
+        )
 
         return EvidenceResponse(
             short_answer=normalized,
             evidence_bullets=evidence_bullets,
             citations=citations,
+            trust_indicators=trust_indicators,
+            verification_status=verification_status,
             status=status,
             needs_manual_check=needs_manual,
+            manual_check_reasons=manual_check_reasons,
+            next_questions=next_questions,
         )
 
     def preferred_sources(self, *, region: str, species_focus: str) -> list[str]:
@@ -147,8 +196,14 @@ class EvidenceService:
             "**Короткий ответ**",
             resp.short_answer,
             "",
-            "**Evidence**",
+            "**Trust**",
         ]
+        for indicator in resp.trust_indicators:
+            lines.append(f"- {indicator}")
+        lines.extend([
+            "",
+            "**Evidence**",
+        ])
         for row in resp.evidence_bullets:
             lines.append(f"- {row}")
         lines.append("")
@@ -162,6 +217,10 @@ class EvidenceService:
         lines.append(f"**Статус:** `{resp.status}`")
         if resp.needs_manual_check:
             lines.append("**Manual check:** требуется ручная проверка")
+        if resp.manual_check_reasons:
+            lines.append("**Почему manual check**")
+            for reason in resp.manual_check_reasons:
+                lines.append(f"- {reason}")
         return "\n".join(lines).strip()
 
     @staticmethod
@@ -222,3 +281,46 @@ class EvidenceService:
             seen.add(key)
             out.append(normalized)
         return out
+
+    @staticmethod
+    def _source_class_for_category(category: str) -> str:
+        category_norm = (category or "").strip().lower()
+        if category_norm in {"product_label_or_spc", "regulator"}:
+            return "official"
+        if category_norm == "licensed_formulary":
+            return "licensed"
+        if category_norm in {"public_guideline", "public_manual"}:
+            return "public"
+        return "mixed"
+
+    @staticmethod
+    def _trust_bucket(trust_level: int) -> str:
+        if trust_level >= 5:
+            return "high"
+        if trust_level >= 3:
+            return "medium"
+        return "low"
+
+    @classmethod
+    def _format_trust_indicator(cls, *, source_class: str, trust_bucket: str, verification_status: str) -> str:
+        return f"src:{source_class} | trust:{trust_bucket} | verify:{verification_status}"
+
+    @classmethod
+    def _finalize_trust_indicators(
+        cls,
+        *,
+        trust_indicators: list[str],
+        source_classes: list[str],
+        trust_levels: list[int],
+        verification_status: str,
+    ) -> list[str]:
+        if not trust_indicators:
+            return [cls._format_trust_indicator(source_class="mixed", trust_bucket="low", verification_status=verification_status)]
+        top_level = max(trust_levels or [0])
+        top_class = source_classes[0] if source_classes else "mixed"
+        compact = cls._format_trust_indicator(
+            source_class=top_class,
+            trust_bucket=cls._trust_bucket(top_level),
+            verification_status=verification_status,
+        )
+        return [compact]

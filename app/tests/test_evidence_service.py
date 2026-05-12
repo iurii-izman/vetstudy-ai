@@ -34,6 +34,8 @@ def test_high_risk_exact_label_single_source_can_be_verified(tmp_path):
 
     assert resp.status == "verified"
     assert resp.needs_manual_check is False
+    assert resp.trust_indicators
+    assert resp.verification_status == "verified"
 
 
 def test_high_risk_public_manual_single_source_needs_manual_check(tmp_path):
@@ -67,6 +69,8 @@ def test_high_risk_public_manual_single_source_needs_manual_check(tmp_path):
 
     assert resp.status == "needs_manual_check"
     assert resp.needs_manual_check is True
+    assert resp.manual_check_reasons
+    assert resp.next_questions
 
 
 def test_preferred_sources_by_region_and_species(tmp_path):
@@ -149,3 +153,35 @@ def test_evidence_postprocess_keeps_manual_check_when_citations_filtered(tmp_pat
     assert resp.citations == []
     assert resp.status == "needs_manual_check"
     assert resp.needs_manual_check is True
+
+
+def test_evidence_render_includes_compact_trust_indicators(tmp_path):
+    path = tmp_path / "sources.json"
+    path.write_text(
+        """
+        {
+          "sources": [
+            {
+              "source_id": "label",
+              "title": "Exact Product SPC",
+              "category": "product_label_or_spc",
+              "trust_level": 5,
+              "region": "Moldova/Transnistria",
+              "species": "dog"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    service = EvidenceService()
+    service.settings.evidence_sources_path = str(path)
+    resp = service.build_response(
+        query="Какой план?",
+        llm_answer="Учебный шаг по источнику.",
+        retrieved=[SimpleNamespace(chunk_id="c1", memory_id=None, source_title="Exact Product SPC", snippet="Protocol detail.")],
+        high_risk=False,
+    )
+    rendered = service.render_markdown(resp)
+    assert "**Trust**" in rendered
+    assert "src:official | trust:high | verify:partially_verified" in rendered

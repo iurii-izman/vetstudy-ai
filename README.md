@@ -14,7 +14,7 @@ VetStudy AI is a Telegram-first educational assistant for veterinary study, virt
 
 ## Product Surface
 
-- Telegram commands: `/start`, `/help`, `/profile`, `/status`, `/topics`, `/bind_topic`, `/create_default_topics`, `/new`, `/mode`, `/evidence`, `/summary`, `/search`, `/save`, `/cards`, `/quiz`, `/review`, `/today`, `/case`, `/case_answer`, `/docs`, `/export`
+- Telegram commands: `/start`, `/help`, `/profile`, `/status`, `/topics`, `/bind_topic`, `/create_default_topics`, `/new`, `/mode`, `/evidence`, `/why`, `/summary`, `/search`, `/save`, `/cards`, `/quiz`, `/review`, `/today`, `/case`, `/case_answer`, `/docs`, `/export`
 - Learning memory: user-scoped notes, summaries, saved answers, search, Anki/Markdown exports
 - Flashcards: generation, spaced-review actions, review event tracking
 - Documents: TXT/MD/PDF/DOCX extraction and Redis-backed indexing jobs

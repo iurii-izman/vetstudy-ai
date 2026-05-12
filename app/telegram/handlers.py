@@ -299,6 +299,57 @@ def _safety_error_text() -> str:
     return "Для безопасного ответа не хватает данных. Следующий шаг: укажите вид, вес, возраст, симптомы и точный препарат/ситуацию."
 
 
+def _minimal_next_questions(*, safety=None, evidence_payload: dict | None = None, limit: int = 3) -> list[str]:
+    items: list[str] = []
+    for question in list(getattr(safety, "clarifying_questions", []) or []):
+        cleaned = str(question).strip()
+        if cleaned:
+            items.append(cleaned)
+    for question in list((evidence_payload or {}).get("next_questions", []) or []):
+        cleaned = str(question).strip()
+        if cleaned:
+            items.append(cleaned)
+    if not items:
+        items = [
+            "Уточните вид, вес, возраст и ключевые симптомы.",
+            "Уточните точный препарат/концентрацию/маршрут.",
+        ]
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for question in items:
+        key = question.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(question)
+    return deduped[:limit]
+
+
+def _guided_clarification_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(text="⚖️ Вид/вес/возраст", callback_data=_callback_data("clarify_quick", "patient")),
+            InlineKeyboardButton(text="💊 Препарат/доза", callback_data=_callback_data("clarify_quick", "drug")),
+        ],
+        [InlineKeyboardButton(text="🧪 Симптомы/таймлайн", callback_data=_callback_data("clarify_quick", "timeline"))],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _why_payload_for_meta(meta: dict | None) -> dict:
+    payload = dict(meta or {})
+    safety_meta = dict(payload.get("safety") or {})
+    evidence_meta = dict(payload.get("evidence") or {})
+    return {
+        "risk_intent": safety_meta.get("intent"),
+        "risk_tags": list(safety_meta.get("risk_tags") or []),
+        "needs_manual_check": bool(evidence_meta.get("needs_manual_check")),
+        "manual_check_reasons": list(evidence_meta.get("manual_check_reasons") or []),
+        "missing_data": list(evidence_meta.get("next_questions") or []),
+        "verification_status": evidence_meta.get("verification_status") or evidence_meta.get("status"),
+    }
+
+
 def _next_step_keyboard(context: str) -> InlineKeyboardMarkup:
     if context == "quota":
         rows = [
@@ -432,10 +483,8 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
             safety = safety_gate.check(text)
             if not safety.allowed:
                 warn = safety.warning or _safety_error_text()
-                if safety.clarifying_questions:
-                    warn = f"{warn}\n\n" + "\n".join(f"- {q}" for q in safety.clarifying_questions)
-                else:
-                    warn = f"{warn}\n\nСледующий шаг: добавьте недостающие клинические данные и повторите запрос."
+                next_questions = _minimal_next_questions(safety=safety)
+                warn = f"{warn}\n\n" + "\n".join(f"- {q}" for q in next_questions)
                 analytics.track(
                     user_id=user.id,
                     topic_id=topic.id,
@@ -443,7 +492,7 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                     event_name="safety_clarification_required",
                     properties={"risk_tags": getattr(safety, "risk_tags", [])},
                 )
-                await message.answer(warn, reply_markup=_next_step_keyboard("safety"))
+                await message.answer(warn, reply_markup=_guided_clarification_keyboard())
                 return
             memory = MemoryService(MemoryRepo(db), topic_repo=TopicRepo(db), embedder=llm_router, chunk_repo=DocumentChunkRepo(db))
             search_results = await memory.search(db=db, user_id=user.id, query=text, current_topic_id=topic.id, top_k=5, cross_topic=True)
@@ -508,9 +557,14 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 rendered_answer = evidence.render_markdown(evidence_resp)
                 evidence_payload = {
                     "status": evidence_resp.status,
+                    "verification_status": evidence_resp.verification_status,
                     "citations": evidence_resp.citations,
+                    "trust_indicators": evidence_resp.trust_indicators,
                     "needs_manual_check": evidence_resp.needs_manual_check,
+                    "manual_check_reasons": evidence_resp.manual_check_reasons,
+                    "next_questions": evidence_resp.next_questions,
                 }
+            followup_questions = _minimal_next_questions(safety=safety, evidence_payload=evidence_payload)
             assistant_msg = chat_db.save_assistant_message(
                 session.id,
                 rendered_answer,
@@ -520,6 +574,13 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                     "effective_mode": effective_mode,
                     "high_risk": high_risk,
                     "evidence": evidence_payload,
+                    "why_trace": {
+                        "risk_intent": getattr(safety, "intent", None),
+                        "risk_tags": list(getattr(safety, "risk_tags", []) or []),
+                        "needs_manual_check": bool((evidence_payload or {}).get("needs_manual_check")),
+                        "manual_check_reasons": list((evidence_payload or {}).get("manual_check_reasons", []) or []),
+                        "missing_data": followup_questions,
+                    },
                 },
             )
             analytics.track(
@@ -529,7 +590,11 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 event_name="activation_first_answer",
                 properties={"effective_mode": effective_mode, "high_risk": high_risk},
             )
+            needs_followup = bool((evidence_payload or {}).get("status") in {"needs_manual_check", "partially_verified"})
             await _send_ai_answer(message, rendered_answer)
+            if needs_followup and followup_questions:
+                guidance = "Чтобы повысить уверенность ответа, уточните:\n" + "\n".join(f"- {q}" for q in followup_questions)
+                await message.answer(guidance, reply_markup=_guided_clarification_keyboard())
             await _try_ingest_answer(
                 memory,
                 db=db,
@@ -656,7 +721,7 @@ async def cmd_help(message: Message):
         return
     await message.answer(
         "Онбординг:\n/start\n/status\n/topics\n/create_default_topics\n/bind_topic <slug_or_name>\n\n"
-        "Сессия:\n/new\n/mode\n/evidence\n/save\n/search\n/summary\n/profile\n\n"
+        "Сессия:\n/new\n/mode\n/evidence\n/why\n/save\n/search\n/summary\n/profile\n\n"
         "Обучение:\n/today [light|standard|intensive]\n/plan_week\n/cards\n/review\n/quiz\n/export\n\n"
         "Отчет:\n/weekly\n\n"
         "Клинические кейсы:\n/case — выбрать виртуальный кейс\n/case_answer — отправить анализ на оценку\n\n"
@@ -922,6 +987,50 @@ async def cmd_mode(message: Message, command: CommandObject):
 @router.message(Command("evidence"))
 async def cmd_evidence(message: Message):
     await cmd_mode(message, CommandObject(command="/mode", args="evidence"))
+
+
+@router.message(Command("why"))
+async def cmd_why(message: Message):
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        chat_db = ChatDBService(db)
+        user = chat_db.ensure_user(message.from_user.id, message.from_user.full_name if message.from_user else None)
+        topic = chat_db.get_topic_for_chat_thread(message.chat.id, message.message_thread_id)
+        if not topic or not topic.subject_id:
+            await message.answer(_topic_required_text(message.message_thread_id))
+            return
+        session = SessionRepo(db).get_active(user.id, topic.id)
+        if not session:
+            await message.answer("Нет активной сессии. Сначала задайте вопрос.")
+            return
+        last = MessageRepo(db).last_assistant(session.id)
+        if not last:
+            await message.answer("Пока нет ответа для explain-режима.")
+            return
+        meta = dict(last.metadata_ or {})
+        trace = dict(meta.get("why_trace") or _why_payload_for_meta(meta))
+        risk_tags = list(trace.get("risk_tags") or [])
+        reasons = list(trace.get("manual_check_reasons") or [])
+        missing_data = list(trace.get("missing_data") or [])
+        lines = [
+            "Explain (/why) для последнего ответа:",
+            f"- risk intent: {trace.get('risk_intent') or 'unknown'}",
+            f"- risk tags: {', '.join(risk_tags) if risk_tags else 'none'}",
+        ]
+        needs_manual = bool(trace.get("needs_manual_check"))
+        lines.append(f"- needs_manual_check: {'yes' if needs_manual else 'no'}")
+        if reasons:
+            lines.append("- почему needs_manual_check:")
+            lines.extend([f"  • {item}" for item in reasons[:3]])
+        if missing_data:
+            lines.append("- каких данных не хватило:")
+            lines.extend([f"  • {item}" for item in missing_data[:3]])
+        lines.append("Без внутренних системных промптов и секретов.")
+        await message.answer("\n".join(lines))
+    finally:
+        db.close()
 
 
 @router.message(Command("summary"))
@@ -1778,6 +1887,17 @@ async def on_ai_action(query: CallbackQuery):
             db.close()
         if query.message:
             await query.message.answer("Спасибо за обратную связь! Используй /case для следующего кейса.")
+        return
+    if parsed.action == "clarify_quick":
+        if not query.message:
+            return
+        templates = {
+            "patient": "Заполни: вид= ; вес_кг= ; возраст= ; пол/стерилизация= .",
+            "drug": "Заполни: препарат= ; концентрация= ; маршрут= ; частота= ; источник(label/SPC/formulary)= .",
+            "timeline": "Заполни: ключевые симптомы= ; длительность= ; динамика= ; red_flags= .",
+        }
+        text = templates.get(parsed.payload, "Добавьте минимальные клинические данные: вид, вес, возраст, симптомы, препарат.")
+        await query.message.answer(text)
         return
     # ── General feedback ────────────────────────────────────────────────────
     if parsed.action in {"fb_up", "fb_down", "fb_error"}:

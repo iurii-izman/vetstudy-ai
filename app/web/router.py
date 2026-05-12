@@ -838,6 +838,48 @@ def admin_evidence_needs_check(
     return out
 
 
+@router.get("/admin/trust-safety-trace")
+def admin_trust_safety_trace(
+    limit: int = 30,
+    _: str = Depends(_check_token),
+    user: User = Depends(_get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
+    _require_admin(user)
+    rows = db.execute(
+        select(Message)
+        .where(Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .limit(min(limit, 200))
+    ).scalars().all()
+    out: list[dict] = []
+    for row in rows:
+        meta = row.metadata_ or {}
+        if not bool(meta.get("high_risk")):
+            continue
+        safety = dict(meta.get("safety") or {})
+        evidence = dict(meta.get("evidence") or {})
+        why_trace = dict(meta.get("why_trace") or {})
+        out.append(
+            {
+                "message_id": row.id,
+                "session_id": row.session_id,
+                "created_at": row.created_at,
+                "risk_intent": safety.get("intent"),
+                "risk_tags": list(safety.get("risk_tags") or []),
+                "verification_status": evidence.get("verification_status") or evidence.get("status"),
+                "trust_indicators": list(evidence.get("trust_indicators") or []),
+                "needs_manual_check": bool(evidence.get("needs_manual_check")),
+                "manual_check_reasons": list(why_trace.get("manual_check_reasons") or evidence.get("manual_check_reasons") or []),
+                "missing_data": list(why_trace.get("missing_data") or evidence.get("next_questions") or []),
+                "preview": row.content[:280],
+            }
+        )
+    return out
+
+
 @router.patch("/admin/users/{target_user_id}/role")
 def admin_set_role(
     target_user_id: UUID,

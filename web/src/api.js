@@ -65,4 +65,5 @@ export const api = {
   updateFeedback: async (token, feedbackId, payload) => ensureObject(await req(`/admin/feedback/${feedbackId}`, token, { method: 'PATCH', body: JSON.stringify(payload) }), 'updateFeedback'),
   sourceCoverage: async (token) => ensureObject(await req('/admin/evidence/source-coverage', token), 'sourceCoverage'),
   needsCheck: async (token) => ensureArray(await req('/admin/evidence/needs-check', token), 'needsCheck'),
+  trustSafetyTrace: async (token) => ensureArray(await req('/admin/trust-safety-trace', token), 'trustSafetyTrace'),
 }

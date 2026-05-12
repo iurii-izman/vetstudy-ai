@@ -264,6 +264,44 @@ async def test_mode_evidence_allowed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_why_command_shows_trace(monkeypatch):
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={}),
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1"),
+        ),
+    )
+    monkeypatch.setattr(handlers, "SessionRepo", lambda db: SimpleNamespace(get_active=lambda *a, **k: SimpleNamespace(id="s-1")))
+    monkeypatch.setattr(
+        handlers,
+        "MessageRepo",
+        lambda db: SimpleNamespace(
+            last_assistant=lambda *a, **k: SimpleNamespace(
+                metadata_={
+                    "why_trace": {
+                        "risk_intent": "dosage_request",
+                        "risk_tags": ["dosage", "nsaids_in_cats"],
+                        "needs_manual_check": True,
+                        "manual_check_reasons": ["Нет точной концентрации."],
+                        "missing_data": ["Уточните вид и вес."],
+                    }
+                }
+            )
+        ),
+    )
+    message = FakeMessage(user_id=1, text="/why")
+    await handlers.cmd_why(message)
+    text = message.answers[0]["text"]
+    assert "risk intent: dosage_request" in text
+    assert "needs_manual_check: yes" in text
+    assert "Без внутренних системных промптов" in text
+
+
+@pytest.mark.asyncio
 async def test_today_command_builds_route_and_tracks_event(monkeypatch):
     tracked = []
     monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
@@ -543,6 +581,19 @@ async def test_callback_save_creates_note(monkeypatch):
     assert saved
     assert saved[0]["kind"] == "note"
     assert any("Сохранено" in item["text"] for item in query.message.answers)
+
+
+@pytest.mark.asyncio
+async def test_callback_clarify_quick(monkeypatch):
+    monkeypatch.setattr(handlers, "get_settings", lambda: SimpleNamespace(allowed_user_ids={7}))
+    query = SimpleNamespace(
+        data=handlers._callback_data("clarify_quick", "drug"),
+        from_user=SimpleNamespace(id=7, full_name="U"),
+        answer=lambda *a, **k: _async_return(None),
+        message=FakeMessage(),
+    )
+    await handlers.on_ai_action(query)
+    assert any("препарат=" in item["text"] for item in query.message.answers)
 
 @pytest.mark.asyncio
 async def test_review_shows_leech_hint(monkeypatch):

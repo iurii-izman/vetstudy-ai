@@ -30,6 +30,7 @@ function installFetchMock(overrides = {}) {
     if (u.includes('/admin/analytics/summary')) return { ok: true, json: async () => ({ behavior: { high_risk_query_count: 2 }, content_gap_report: { zero_results_total: 1, zero_results_by_topic: { Surgery: 1 } } }) }
     if (u.includes('/admin/evidence/source-coverage')) return { ok: true, json: async () => ({ missing: false, total_sources: 2 }) }
     if (u.includes('/admin/evidence/needs-check')) return { ok: true, json: async () => [] }
+    if (u.includes('/admin/trust-safety-trace')) return { ok: true, json: async () => [] }
     if (u.includes('/privacy/export')) return { ok: true, json: async () => ({ ok: true }) }
     return { ok: true, json: async () => ({}) }
   })

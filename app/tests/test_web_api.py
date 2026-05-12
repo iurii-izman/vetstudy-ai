@@ -49,7 +49,26 @@ def make_client():
     sess3 = Session(mode='practical', user_id=user1.id, topic_id=topic3.id, is_active=False)
     db.add_all([sess1, sess2, sess3])
     db.flush()
-    msg1 = Message(role='assistant', content='U1 answer', session_id=sess1.id)
+    msg1 = Message(
+        role='assistant',
+        content='U1 answer',
+        session_id=sess1.id,
+        metadata_={
+            "high_risk": True,
+            "safety": {"intent": "dosage_request", "risk_tags": ["dosage_request"]},
+            "evidence": {
+                "status": "needs_manual_check",
+                "verification_status": "needs_manual_check",
+                "trust_indicators": ["src:official | trust:high | verify:needs_manual_check"],
+                "needs_manual_check": True,
+                "manual_check_reasons": ["Need exact product concentration."],
+                "next_questions": ["Species and weight?"],
+            },
+            "why_trace": {
+                "missing_data": ["Species and weight?"],
+            },
+        },
+    )
     msg2 = Message(role='assistant', content='U2 answer', session_id=sess2.id)
     db.add_all([msg1, msg2])
     db.flush()
@@ -254,6 +273,10 @@ def test_admin_evidence_endpoints():
 
     needs = client.get('/api/web/admin/evidence/needs-check', headers=_owner_headers())
     assert needs.status_code == 200
+    trace = client.get('/api/web/admin/trust-safety-trace', headers=_owner_headers())
+    assert trace.status_code == 200
+    assert trace.json()
+    assert trace.json()[0]["risk_intent"] == "dosage_request"
 
 
 def test_search_facets_and_topic_graph():
