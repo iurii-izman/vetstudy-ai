@@ -72,6 +72,18 @@ EMBEDDED_COMMAND_PATTERN = re.compile(
 )
 
 
+def _parse_bind_topic_args(raw_args: str | None) -> tuple[str, int | None]:
+    raw = (raw_args or "").strip()
+    if not raw:
+        return "", None
+    parts = raw.split()
+    maybe_thread = parts[-1]
+    if maybe_thread.isdigit():
+        subject_value = " ".join(parts[:-1]).strip()
+        return subject_value, int(maybe_thread)
+    return raw, None
+
+
 def _check_allow(message: Message) -> bool:
     from app.config import get_settings
 
@@ -1059,9 +1071,21 @@ async def cmd_topics(message: Message):
 async def cmd_bind_topic(message: Message, command: CommandObject):
     if await _deny_if_not_allowed(message):
         return
-    value = (command.args or "").strip()
+    value, explicit_thread_id = _parse_bind_topic_args(command.args)
     if not value:
-        await message.answer("Использование: /bind_topic <slug_or_name>")
+        await message.answer(
+            "Использование: /bind_topic <slug_or_name> [thread_id]\n"
+            "Пример в теме: /bind_topic surgery\n"
+            "Пример из общего чата: /bind_topic surgery 282",
+        )
+        return
+    thread_id = explicit_thread_id if explicit_thread_id is not None else message.message_thread_id
+    if thread_id is None:
+        await message.answer(
+            "Не вижу thread id для привязки.\n"
+            "Откройте нужный forum topic и выполните /bind_topic <slug_or_name>\n"
+            "или укажите id явно: /bind_topic <slug_or_name> <thread_id>",
+        )
         return
     db = new_session()
     try:
@@ -1072,7 +1096,7 @@ async def cmd_bind_topic(message: Message, command: CommandObject):
                 "Тема не найдена в subjects. Проверьте slug/title или создайте subject в БД.",
             )
             return
-        topic = TopicRepo(db).bind_subject(chat_id=message.chat.id, thread_id=message.message_thread_id, subject=subject)
+        topic = TopicRepo(db).bind_subject(chat_id=message.chat.id, thread_id=thread_id, subject=subject)
         ProductAnalyticsService(db).track(
             user_id=user.id,
             topic_id=topic.id,
@@ -1082,7 +1106,7 @@ async def cmd_bind_topic(message: Message, command: CommandObject):
         _complete_onboarding_step(user=user, step="bind_topic", analytics=ProductAnalyticsService(db), topic_id=topic.id)
         db.commit()
         await message.answer(
-            f"Привязано: '{topic.title}' (slug={subject.slug}) к thread id {message.message_thread_id}.",
+            f"Привязано: '{topic.title}' (slug={subject.slug}) к thread id {thread_id}.",
         )
     finally:
         db.close()

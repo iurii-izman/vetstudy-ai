@@ -6,10 +6,18 @@ from app.telegram.callbacks import callback_data
 
 
 def topic_required_text(thread_id: int | None) -> str:
+    if thread_id is None:
+        return (
+            "Текущий thread id: None\n"
+            "Похоже, сообщение отправлено вне forum topic.\n"
+            "Откройте нужный topic и используйте: /bind_topic <slug_or_name>\n"
+            "или привяжите из общего чата: /bind_topic <slug_or_name> <thread_id>\n"
+            "Быстрый старт: /create_default_topics"
+        )
     return (
         f"Текущий thread id: {thread_id}\n"
         "Этот Telegram topic пока не привязан к учебной теме.\n"
-        "Используйте: /bind_topic <slug_or_name>\n"
+        "Используйте: /bind_topic <slug_or_name> [thread_id]\n"
         "Быстрый старт: /create_default_topics"
     )
 

@@ -79,6 +79,24 @@ async def _async_return(value):
     return value
 
 
+def test_parse_bind_topic_args_without_thread_id():
+    value, thread_id = handlers._parse_bind_topic_args("surgery")
+    assert value == "surgery"
+    assert thread_id is None
+
+
+def test_parse_bind_topic_args_with_thread_id():
+    value, thread_id = handlers._parse_bind_topic_args("surgery 282")
+    assert value == "surgery"
+    assert thread_id == 282
+
+
+def test_parse_bind_topic_args_with_title_and_thread_id():
+    value, thread_id = handlers._parse_bind_topic_args("Внутренние болезни 283")
+    assert value == "Внутренние болезни"
+    assert thread_id == 283
+
+
 class _DocumentJobDb:
     def __init__(self, user):
         self.user = user
