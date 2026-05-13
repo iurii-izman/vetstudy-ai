@@ -80,6 +80,9 @@ class _FakeResult:
     def scalar_one(self):
         return self._scalar
 
+    def scalar_one_or_none(self):
+        return self._scalar
+
     def one_or_none(self):
         return self._row
 
@@ -123,6 +126,7 @@ def test_build_daily_route_fallback_when_no_cards(monkeypatch):
             _FakeResult(row=[]),
             _FakeResult(row=[]),
             _FakeResult(row=("Терапия",)),
+            _FakeResult(scalar=SimpleNamespace(settings={})),
         ]
     )
     route = service.build_daily_route(db=db, user_id="u-1", topic_id="t-1", now=datetime(2026, 5, 3, 10, 0, 0))
@@ -166,6 +170,7 @@ def test_build_daily_route_from_existing_cards(monkeypatch):
             _FakeResult(row=[({"kind": "provider"},)]),
             _FakeResult(row=[({"difficulty": "basic"},)]),
             _FakeResult(row=("Терапия",)),
+            _FakeResult(scalar=SimpleNamespace(settings={})),
         ]
     )
     route = service.build_daily_route(db=db, user_id="u-1", topic_id="t-1", now=datetime(2026, 5, 3, 10, 0, 0), mode="intensive")
@@ -212,6 +217,7 @@ def test_build_week_plan(monkeypatch):
     assert len(plan.days) == 7
     assert plan.streak_days == 5
     assert "/case" in plan.days[0].planned_commands
+    assert len(plan.days[0].planned_commands) <= 3
 
 
 def test_build_weekly_recap_counts(monkeypatch):
@@ -231,3 +237,67 @@ def test_build_weekly_recap_counts(monkeypatch):
     assert recap.high_risk_queries == 2
     assert recap.questions_asked == 11
     assert recap.weak_topics == ["Терапия", "Кардио"]
+
+
+def test_mastery_update_and_recovery_route():
+    service = LearningService()
+    user = SimpleNamespace(id="u-1", settings={})
+
+    class _Db:
+        def __init__(self):
+            self.user = user
+
+        def execute(self, _stmt):
+            return SimpleNamespace(scalar_one_or_none=lambda: self.user)
+
+        def commit(self):
+            return None
+
+    db = _Db()
+    mastery, weak = service.update_mastery_for_topic(
+        db=db,
+        user_id="u-1",
+        topic_id="t-1",
+        topic_title="Терапия",
+        review_score=0,
+        feedback_type="error",
+    )
+    assert mastery["score"] <= 50
+    assert isinstance(weak, list)
+    decision = service.select_recovery_route(
+        due_count=8,
+        relaunch_days=0,
+        high_risk_block_count=3,
+        negative_feedback_count=2,
+        streak_days=1,
+    )
+    assert decision.intensity == "light"
+    assert decision.route == "overload_light"
+
+
+def test_checkpoint_evaluation_and_remediation_plan():
+    service = LearningService()
+    result = service.evaluate_checkpoint(
+        items=[
+            {"type": "mcq", "question": "Q1", "correct_answer": "B", "rationale": "R1", "misconception_tag": "tag1", "why_in_practice": "P1"},
+            {"type": "reasoning", "question": "Q2", "correct_answer": "short", "rationale": "R2", "misconception_tag": "tag2", "why_in_practice": "P2"},
+        ]
+    )
+    assert result.checkpoint_score <= 20
+    assert "tag1" in result.misconception_tags or "tag2" in result.misconception_tags
+    assert result.recommended_next_step == "/fix_gaps"
+    plan = service.build_remediation_plan(weak_skills=["tag1", "topic:therapy"], high_risk=True)
+    assert len(plan.steps) == 5
+    assert plan.safety_framing is True
+
+
+def test_score_checkpoint_answers():
+    service = LearningService()
+    items = [
+        {"id": "q1", "type": "mcq", "correct_answer": "B", "rationale": "R1", "misconception_tag": "m1", "why_in_practice": "W1"},
+        {"id": "q2", "type": "reasoning", "ideal_answer": "triage hydration renal risk", "rationale": "R2", "misconception_tag": "m2", "why_in_practice": "W2"},
+    ]
+    result = service.score_checkpoint_answers(items=items, answers={"q1": "B", "q2": "Оценить triage и hydration, проверить renal risk"})
+    assert result.checkpoint_score >= 90
+    bad = service.score_checkpoint_answers(items=items, answers={"q1": "A", "q2": "не знаю"})
+    assert bad.checkpoint_score <= 20

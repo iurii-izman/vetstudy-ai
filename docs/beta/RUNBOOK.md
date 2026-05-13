@@ -55,3 +55,21 @@
   - backend/API: `http://localhost:8000`
   - frontend dev server: `http://localhost:5173`
 - `http://localhost:1455` is not used by this project unless overridden externally.
+
+## 8. Docker project isolation and hygiene
+- Compose stack name is fixed as `vetstudy` (`name: vetstudy` in `docker-compose.yml`), so containers/network/volumes stay isolated from other projects.
+- App services (`backend`, `bot`, `media-worker`) share one runtime image: `vetstudy/app:local`; this avoids duplicate per-service images.
+- Service labels are set for filtering/monitoring:
+  - `com.vetstudy.project=vetstudy`
+  - `com.vetstudy.stack=beta`
+  - `com.vetstudy.role=<service>`
+- Useful monitoring commands:
+  - `docker compose ps`
+  - `docker compose logs bot --tail=300`
+  - `docker ps --filter label=com.vetstudy.project=vetstudy`
+  - `docker stats $(docker ps -q --filter label=com.vetstudy.project=vetstudy)`
+- Safe cleanup workflow (do not touch named project volumes unless you want data loss):
+  - audit first: `docker system df -v`
+  - remove unused images only: `docker image prune -a`
+  - remove unused build cache: `docker builder prune -a`
+  - remove unused anonymous volumes only: `docker volume prune`

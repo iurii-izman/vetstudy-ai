@@ -1,7 +1,7 @@
 import { EmptyState, LoadingState } from '../../shared/ui/States'
 import { formatDate } from '../../shared/utils'
 
-export function AdminScreen({ feedback, analyticsSummary, costBudgetAlert, stats, trustTrace, onUpdateFeedback, pendingFeedbackIds, loading }) {
+export function AdminScreen({ feedback, analyticsSummary, learningExperiments, costBudgetAlert, stats, trustTrace, onUpdateFeedback, pendingFeedbackIds, loading }) {
   if (loading) return <LoadingState label="Loading admin dashboard..." />
   const openFeedback = feedback.filter((x) => x.feedback_type !== 'up' && x.status !== 'resolved' && x.status !== 'ignored')
   const highRiskCount = analyticsSummary?.behavior?.high_risk_query_count || 0
@@ -14,6 +14,10 @@ export function AdminScreen({ feedback, analyticsSummary, costBudgetAlert, stats
   const budgetLevel = costBudgetAlert?.alert_level || 'unknown'
   const budgetTopModel = costBudgetAlert?.top_models?.[0]
   const budgetTopModelLabel = budgetTopModel ? `${budgetTopModel.provider}/${budgetTopModel.model}` : 'n/a'
+  const learningKpis = learningExperiments?.kpis || {}
+  const funnel = learningExperiments?.funnel || []
+  const checkpointTable = learningExperiments?.checkpoint_table || []
+  const comebackTable = learningExperiments?.comeback_table || []
 
   return (
     <section className="settings-view">
@@ -40,6 +44,34 @@ export function AdminScreen({ feedback, analyticsSummary, costBudgetAlert, stats
             <dt>Remaining</dt><dd>${Number(costBudgetAlert?.remaining_usd || 0).toFixed(4)}</dd>
             <dt>Top model</dt><dd>{budgetTopModelLabel}</dd>
           </dl>
+        </div>
+        <div className="settings-panel">
+          <h2>Learning Experiments</h2>
+          <dl>
+            <dt>CTA step completion</dt><dd>{Math.round((learningKpis.cta_step_completion_rate || 0) * 100)}%</dd>
+            <dt>Checkpoint completion</dt><dd>{Math.round((learningKpis.checkpoint_completion_rate || 0) * 100)}%</dd>
+            <dt>Remediation completion</dt><dd>{Math.round((learningKpis.remediation_completion_rate || 0) * 100)}%</dd>
+            <dt>Comeback success</dt><dd>{Math.round((learningKpis.comeback_success_rate || 0) * 100)}%</dd>
+          </dl>
+        </div>
+        <div className="settings-panel wide">
+          <h2>Learning Funnel</h2>
+          <table>
+            <thead><tr><th>step</th><th>count</th><th>users</th></tr></thead>
+            <tbody>
+              {funnel.map((row) => <tr key={row.step}><td>{row.step}</td><td>{row.count}</td><td>{row.users}</td></tr>)}
+            </tbody>
+          </table>
+        </div>
+        <div className="settings-panel wide">
+          <h2>Checkpoint & Comeback</h2>
+          <table>
+            <thead><tr><th>metric</th><th>value</th><th>flow</th></tr></thead>
+            <tbody>
+              {checkpointTable.map((row) => <tr key={`cp-${row.metric}`}><td>{row.metric}</td><td>{row.count}</td><td>checkpoint</td></tr>)}
+              {comebackTable.map((row) => <tr key={`cb-${row.metric}`}><td>{row.metric}</td><td>{row.count}</td><td>comeback</td></tr>)}
+            </tbody>
+          </table>
         </div>
         <div className="settings-panel wide">
           <h2>Trust &amp; Safety trace</h2>

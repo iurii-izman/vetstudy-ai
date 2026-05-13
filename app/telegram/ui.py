@@ -26,6 +26,17 @@ def build_review_keyboard(card_id: str) -> InlineKeyboardMarkup:
         ]
     )
 
+def build_learning_cta_keyboard(context: str = "default") -> InlineKeyboardMarkup:
+    suffix = context[:24] if context else "default"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Следующий шаг", callback_data=callback_data("learning_next_step", suffix))],
+            [InlineKeyboardButton(text="Мини-кейс", callback_data=callback_data("learning_mini_case", suffix))],
+            [InlineKeyboardButton(text="3 карточки", callback_data=callback_data("learning_three_cards", suffix))],
+            [InlineKeyboardButton(text="Продолжить", callback_data=callback_data("continue_now", suffix))],
+        ]
+    )
+
 
 def build_main_menu_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(

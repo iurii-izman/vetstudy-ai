@@ -88,6 +88,8 @@ class MemoryService:
         all_rows = self.memory_repo.by_user(user_id=user_id, limit=300)
         query_vec: list[float] = []
         query_tags = self.extract_tags(query)
+        query_terms = self._query_terms(query)
+        min_overlap = self._minimum_overlap_required(query_terms)
         if self.embedder is not None:
             try:
                 vectors = await self.embedder.embed(db, user_id, [query])
@@ -99,13 +101,26 @@ class MemoryService:
         filtered = [r for r in all_rows if cross_topic or r.topic_id == current_topic_id]
         scored: list[tuple[float, MemoryItem]] = []
         for row in filtered:
-            score = self._lexical_score(query, row.content)
-            score += self._tag_score(query_tags, row.tags or [])
+            lexical_matches = self._token_overlap_count(query_terms, row.content)
+            lexical_score = float(lexical_matches)
+            tag_overlap = self._tag_overlap_count(query_tags, row.tags or [])
+            tag_score = float(tag_overlap) * 1.25
             row_vec = self._vector_values(row.embedding)
+            vector_similarity = 0.0
+            vector_score = 0.0
             if query_vec and row_vec:
-                score += 2.5 * self._cosine_similarity(query_vec, row_vec)
+                vector_similarity = self._cosine_similarity(query_vec, row_vec)
+                vector_score = 2.5 * vector_similarity
+            if not self._is_relevant_candidate(
+                lexical_matches=lexical_matches,
+                min_overlap=min_overlap,
+                tag_overlap=tag_overlap,
+                vector_similarity=vector_similarity,
+            ):
+                continue
+            score = lexical_score + tag_score + vector_score
             if current_topic_id and row.topic_id == current_topic_id:
-                score += 2.0
+                score += 1.0
             scored.append((score, row))
         scored.sort(key=lambda pair: (pair[0], pair[1].created_at), reverse=True)
         selected = [row for _, row in scored[:top_k]]
@@ -136,6 +151,15 @@ class MemoryService:
             )
             chunk_topic_map = self._topic_map([x[0] for x in chunk_rows])
             for chunk, _score in chunk_rows:
+                lexical_matches = self._token_overlap_count(query_terms, chunk.content)
+                tag_overlap = self._tag_overlap_count(query_tags, list(getattr(chunk, "tags", []) or []))
+                if not self._is_relevant_candidate(
+                    lexical_matches=lexical_matches,
+                    min_overlap=min_overlap,
+                    tag_overlap=tag_overlap,
+                    vector_similarity=0.0,
+                ):
+                    continue
                 topic = chunk_topic_map.get(chunk.topic_id)
                 results.append(
                     SearchResult(
@@ -200,7 +224,7 @@ class MemoryService:
         return found
 
     def _lexical_score(self, query: str, text: str) -> float:
-        words = [w for w in re.split(r"\W+", query.lower()) if w]
+        words = self._query_terms(query)
         hay = text.lower()
         return float(sum(1 for w in words if w in hay))
 
@@ -268,4 +292,47 @@ class MemoryService:
         for left, right in rules:
             if (tags_a & left and tags_b & right) or (tags_b & left and tags_a & right):
                 return True
+        return False
+
+    @staticmethod
+    def _query_terms(query: str) -> list[str]:
+        raw_terms = [w for w in re.split(r"\W+", query.lower()) if w]
+        stopwords = {"и", "или", "что", "как", "для", "при", "это", "the", "and", "for", "with", "a", "an"}
+        return [w for w in raw_terms if w not in stopwords and len(w) >= 3]
+
+    @staticmethod
+    def _minimum_overlap_required(query_terms: list[str]) -> int:
+        if len(query_terms) <= 2:
+            return 1
+        return 2
+
+    @staticmethod
+    def _token_overlap_count(query_terms: list[str], text: str) -> int:
+        if not query_terms:
+            return 0
+        hay = (text or "").lower()
+        return sum(1 for token in set(query_terms) if token in hay)
+
+    @staticmethod
+    def _tag_overlap_count(query_tags: list[str], item_tags: list[str]) -> int:
+        if not query_tags or not item_tags:
+            return 0
+        return len(set(query_tags).intersection(set(item_tags)))
+
+    @staticmethod
+    def _is_relevant_candidate(
+        *,
+        lexical_matches: int,
+        min_overlap: int,
+        tag_overlap: int,
+        vector_similarity: float,
+    ) -> bool:
+        if lexical_matches >= min_overlap:
+            return True
+        if lexical_matches >= 1 and tag_overlap >= 1:
+            return True
+        if tag_overlap >= 2:
+            return True
+        if vector_similarity >= 0.28:
+            return True
         return False

@@ -5,6 +5,7 @@ import io
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import re
 from sqlalchemy import func, select
 
 from app.db.models import FeedbackEvent, Message, ProductEvent, ReviewEvent, Session as ChatSession, Topic, User
@@ -74,11 +75,351 @@ class WeeklyLearningPlan:
     why_plan: str
 
 
+@dataclass
+class RecoveryRouteDecision:
+    intensity: str
+    reason: str
+    route: str
+    comeback_days: int
+    overload_signals: int
+    success_signals: int
+
+
+@dataclass
+class CheckpointResult:
+    checkpoint_score: int
+    misconception_tags: list[str]
+    recommended_next_step: str
+    breakdown: str
+    raw_items: list[dict]
+
+
+@dataclass
+class RemediationPlan:
+    weak_skills: list[str]
+    steps: list[dict]
+    safety_framing: bool
+    recommended_next_step: str
+
+
 class LearningService:
     CARD_SCHEMA_HINT = '{"cards":[{"front":"...","back":"...","card_type":"fact|cloze|case_next_step|risk_check|owner_explain","difficulty":"easy|medium|hard","needs_manual_check":false,"tags":["..."]}]}'
     QUIZ_SCHEMA_HINT = '{"quiz":[{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"correct_answer":"A|B|C|D","explanation":"...","difficulty":"easy|medium|hard","tags":["..."]}]}'
     DAY_MODES = {"light": {"minutes": 15, "review_n": 2}, "standard": {"minutes": 25, "review_n": 3}, "intensive": {"minutes": 40, "review_n": 5}}
     DIFFICULTY_LEVELS = ("easy", "medium", "hard")
+    HIGH_RISK_TAGS = {"dosage_request", "toxicology", "drug_interaction", "emergency_or_red_flag", "clinical_case", "uncertain_source"}
+
+    @staticmethod
+    def _safe_float(value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _normalize_mastery_score(self, value: float | int | None) -> int:
+        score = self._safe_float(value, 0.0)
+        return max(0, min(100, int(round(score))))
+
+    def _normalize_mastery_confidence(self, value: float | int | None) -> float:
+        conf = self._safe_float(value, 0.5)
+        return round(max(0.0, min(1.0, conf)), 3)
+
+    def _extract_review_mastery_delta(self, score: int | None) -> int:
+        if score is None:
+            return 0
+        normalized = max(0, min(4, int(score)))
+        return (normalized - 2) * 6
+
+    def _extract_feedback_mastery_delta(self, feedback: str) -> int:
+        kind = str(feedback or "").strip().lower()
+        if kind == "up":
+            return 2
+        if kind in {"down", "error"}:
+            return -4
+        return 0
+
+    def _apply_aging(self, settings: dict, *, now: datetime | None = None) -> dict:
+        now = now or datetime.now(UTC)
+        topic_mastery = dict(settings.get("topic_mastery") or {})
+        for key, row in topic_mastery.items():
+            item = dict(row or {})
+            updated_at = str(item.get("updated_at") or "")
+            try:
+                prev = datetime.fromisoformat(updated_at)
+                days = max(0, (now - prev).days)
+            except ValueError:
+                days = 0
+            conf = self._normalize_mastery_confidence(item.get("confidence", 0.5))
+            if days > 0:
+                decay = 0.97 ** min(days, 45)
+                conf = 0.5 + (conf - 0.5) * decay
+            item["confidence"] = self._normalize_mastery_confidence(conf)
+            topic_mastery[key] = item
+        settings["topic_mastery"] = topic_mastery
+
+        raw_meta = dict(settings.get("weak_skills_meta") or {})
+        if not raw_meta and settings.get("weak_skills"):
+            raw_meta = {str(tag).strip().lower(): {"weight": 1.0, "last_seen": now.isoformat()} for tag in settings.get("weak_skills", [])}
+        kept: dict[str, dict] = {}
+        for tag, payload in raw_meta.items():
+            t = str(tag).strip().lower()[:48]
+            if not t:
+                continue
+            item = dict(payload or {})
+            try:
+                prev = datetime.fromisoformat(str(item.get("last_seen") or now.isoformat()))
+                days = max(0, (now - prev).days)
+            except ValueError:
+                days = 0
+            weight = max(0.0, min(1.5, self._safe_float(item.get("weight"), 1.0)))
+            if days > 0:
+                weight = weight * (0.94 ** min(days, 60))
+            if weight >= 0.2:
+                kept[t] = {"weight": round(weight, 4), "last_seen": now.isoformat()}
+        settings["weak_skills_meta"] = kept
+        ranked = sorted(kept.items(), key=lambda x: x[1]["weight"], reverse=True)
+        settings["weak_skills"] = [tag for tag, info in ranked if info["weight"] >= 0.35][:60]
+        return settings
+
+    def update_mastery_for_topic(
+        self,
+        *,
+        db,
+        user_id,
+        topic_id,
+        topic_title: str | None,
+        review_score: int | None = None,
+        quiz_score_percent: int | None = None,
+        feedback_type: str | None = None,
+        detected_weak_skills: list[str] | None = None,
+    ) -> tuple[dict, list[str]]:
+        user = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+        if user is None:
+            return {}, []
+        settings = self._apply_aging(dict(user.settings or {}))
+        topic_key = str(topic_id)
+        existing = dict((settings.get("topic_mastery") or {}).get(topic_key) or {})
+        score = self._normalize_mastery_score(existing.get("score", 50))
+        prev_conf = self._normalize_mastery_confidence(existing.get("confidence", 0.45))
+        confidence = prev_conf
+        delta = self._extract_review_mastery_delta(review_score) + self._extract_feedback_mastery_delta(feedback_type or "")
+        if quiz_score_percent is not None:
+            quiz_delta = int(round((max(0, min(100, int(quiz_score_percent))) - 55) / 8))
+            delta += quiz_delta
+            confidence = min(1.0, confidence + 0.05)
+        if review_score is not None:
+            confidence = min(1.0, confidence + 0.04)
+        if feedback_type in {"down", "error"}:
+            confidence = max(0.1, confidence - 0.06)
+        confidence = self._normalize_mastery_confidence(prev_conf * 0.7 + confidence * 0.3)
+        new_score = self._normalize_mastery_score(score + delta)
+        updated = {
+            "topic_id": topic_key,
+            "topic_title": topic_title or existing.get("topic_title") or "topic",
+            "score": new_score,
+            "confidence": self._normalize_mastery_confidence(confidence),
+            "updated_at": datetime.now(UTC).isoformat(),
+            "last_delta": delta,
+        }
+        topic_mastery = dict(settings.get("topic_mastery") or {})
+        topic_mastery[topic_key] = updated
+        weak_skills_set = {str(x).strip().lower() for x in (settings.get("weak_skills") or []) if str(x).strip()}
+        weak_meta = dict(settings.get("weak_skills_meta") or {})
+        for skill in detected_weak_skills or []:
+            tag = str(skill).strip().lower()
+            if tag:
+                normalized = tag[:48]
+                weak_skills_set.add(normalized)
+                current_weight = self._safe_float((weak_meta.get(normalized) or {}).get("weight"), 0.6)
+                weak_meta[normalized] = {"weight": round(min(1.5, current_weight + 0.18), 4), "last_seen": datetime.now(UTC).isoformat()}
+        if new_score <= 45 and topic_title:
+            ttag = f"topic:{str(topic_title).strip().lower()[:40]}"
+            weak_skills_set.add(ttag)
+            current_weight = self._safe_float((weak_meta.get(ttag) or {}).get("weight"), 0.5)
+            weak_meta[ttag] = {"weight": round(min(1.5, current_weight + 0.12), 4), "last_seen": datetime.now(UTC).isoformat()}
+        settings["topic_mastery"] = topic_mastery
+        for tag in weak_skills_set:
+            if tag not in weak_meta:
+                weak_meta[tag] = {"weight": 0.5, "last_seen": datetime.now(UTC).isoformat()}
+        settings["weak_skills_meta"] = weak_meta
+        settings = self._apply_aging(settings)
+        user.settings = settings
+        db.commit()
+        return updated, list(settings["weak_skills"])
+
+    def topic_mastery_snapshot(self, *, user_settings: dict | None, topic_id) -> dict:
+        topic_mastery = dict((user_settings or {}).get("topic_mastery") or {})
+        return dict(topic_mastery.get(str(topic_id)) or {})
+
+    def detect_weak_skills_for_topic(
+        self,
+        *,
+        db,
+        user_id,
+        topic_id,
+        topic_title: str | None = None,
+        now: datetime | None = None,
+    ) -> list[str]:
+        now = now or datetime.now(UTC)
+        since = now - timedelta(days=21)
+        weak: set[str] = set()
+        rows = db.execute(
+            select(ReviewEvent.score)
+            .where(
+                ReviewEvent.user_id == user_id,
+                ReviewEvent.topic_id == topic_id,
+                ReviewEvent.created_at >= since,
+            )
+            .order_by(ReviewEvent.created_at.desc())
+            .limit(20)
+        ).all()
+        low_scores = sum(1 for item in rows if self._safe_int(item[0], 2) <= 1)
+        if low_scores >= 2:
+            weak.add("low_review_retention")
+        if topic_title:
+            weak.add(f"topic:{topic_title.strip().lower()[:40]}")
+        return sorted(weak)
+
+    def select_recovery_route(
+        self,
+        *,
+        due_count: int,
+        relaunch_days: int,
+        high_risk_block_count: int,
+        negative_feedback_count: int,
+        streak_days: int,
+    ) -> RecoveryRouteDecision:
+        overload_signals = int(high_risk_block_count >= 3) + int(negative_feedback_count >= 2) + int(due_count >= 7)
+        success_signals = int(streak_days >= 5) + int(high_risk_block_count == 0) + int(negative_feedback_count == 0)
+        if relaunch_days >= 3:
+            return RecoveryRouteDecision("light", f"pause_{relaunch_days}_days", "comeback", relaunch_days, overload_signals, success_signals)
+        if overload_signals >= 2:
+            return RecoveryRouteDecision("light", "overload_guard", "overload_light", relaunch_days, overload_signals, success_signals)
+        if success_signals >= 3 and streak_days >= 7:
+            return RecoveryRouteDecision("intensive", "success_streak", "progression_up", relaunch_days, overload_signals, success_signals)
+        return RecoveryRouteDecision("standard", "baseline", "standard", relaunch_days, overload_signals, success_signals)
+
+    async def generate_checkpoint(self, *, llm_router, db, user_id, topic_title: str, context: str) -> list[dict]:
+        prompt = (
+            "Сгенерируй диагностический checkpoint JSON без markdown для vet study. "
+            'Схема: {"checkpoint":[{"id":"q1","type":"mcq|reasoning","question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"correct_answer":"A|B|C|D|short","ideal_answer":"...","rationale":"...","misconception_tag":"...","why_in_practice":"..."}]}. '
+            "Ровно 5 вопросов: 3 mcq и 2 reasoning. Для reasoning correct_answer='short'. "
+            "Избегай unsafe numeric shortcuts и не формируй назначение терапии как предписание."
+            f"\nТема: {topic_title}\nКонтекст:\n{context[:3500]}"
+        )
+        raw = await llm_router.generate(db, user_id, prompt, purpose="summary")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {}
+        items: list[dict] = []
+        for row in payload.get("checkpoint", []):
+            qtype = str(row.get("type", "")).strip().lower()
+            if qtype not in {"mcq", "reasoning"}:
+                continue
+            question = self._clip(row.get("question", ""), 12, 260)
+            if not question:
+                continue
+            options = [self._clip(opt, 4, 150) for opt in (row.get("options") or [])][:4]
+            if qtype == "mcq" and len([opt for opt in options if opt]) < 4:
+                continue
+            items.append(
+                {
+                    "id": self._clip(row.get("id", ""), 2, 12) or f"q{len(items)+1}",
+                    "type": qtype,
+                    "question": question,
+                    "options": [opt for opt in options if opt],
+                    "correct_answer": str(row.get("correct_answer", "short")).strip().upper(),
+                    "ideal_answer": self._clip(row.get("ideal_answer", ""), 8, 260),
+                    "rationale": self._clip(row.get("rationale", ""), 8, 300) or "Сверь логику с базовыми принципами triage и доказательности.",
+                    "misconception_tag": self._clip(row.get("misconception_tag", ""), 3, 40) or "reasoning_gap",
+                    "why_in_practice": self._clip(row.get("why_in_practice", ""), 8, 260) or "Важно для снижения клинических ошибок в реальной практике.",
+                }
+            )
+            if len(items) >= 5:
+                break
+        return items
+
+    def _keywords(self, text: str) -> set[str]:
+        return {w for w in re.findall(r"[a-zA-Zа-яА-Я0-9_]{4,}", (text or "").lower()) if len(w) >= 4}
+
+    def score_checkpoint_answers(self, *, items: list[dict], answers: dict[str, str]) -> CheckpointResult:
+        if not items:
+            return CheckpointResult(0, ["no_data"], "/fix_gaps", "Нет вопросов checkpoint.", [])
+        lines: list[str] = []
+        mis: list[str] = []
+        total = 0
+        max_score = max(1, len(items) * 20)
+        for idx, item in enumerate(items, start=1):
+            qid = str(item.get("id") or f"q{idx}")
+            answer = (answers.get(qid) or "").strip()
+            qtype = str(item.get("type") or "reasoning")
+            correct = str(item.get("correct_answer") or "").strip().upper()
+            ok = False
+            if qtype == "mcq":
+                user_letter = answer[:1].upper()
+                ok = bool(user_letter and user_letter == correct)
+            else:
+                expected = item.get("ideal_answer") or item.get("rationale") or ""
+                overlap = len(self._keywords(answer) & self._keywords(expected))
+                ok = overlap >= 2
+            if ok:
+                total += 20
+                lines.append(f"✅ Q{idx}: верно.")
+            else:
+                tag = str(item.get("misconception_tag") or "reasoning_gap").lower()
+                mis.append(tag)
+                lines.append(f"❌ Q{idx}: {item.get('rationale')}")
+                lines.append(f"Почему важно в практике: {item.get('why_in_practice')}")
+        score = int(round((total / max_score) * 100))
+        next_step = "/fix_gaps" if score < 70 else "/today"
+        return CheckpointResult(score, sorted(set(mis))[:8], next_step, "\n".join(lines), items)
+
+    def evaluate_checkpoint(self, *, items: list[dict]) -> CheckpointResult:
+        if not items:
+            return CheckpointResult(0, ["no_data"], "/fix_gaps", "Checkpoint не сформирован: используй /fix_gaps и повтори попытку.", [])
+        score = 0
+        misconceptions: list[str] = []
+        lines: list[str] = []
+        for item in items:
+            qtype = item.get("type", "reasoning")
+            correct = str(item.get("correct_answer", "short")).upper()
+            if qtype == "mcq":
+                guessed = "A"
+                is_ok = guessed == correct
+            else:
+                is_ok = False
+            if is_ok:
+                score += 20
+                lines.append(f"✅ {item.get('question')}")
+            else:
+                tag = str(item.get("misconception_tag", "reasoning_gap")).strip().lower()
+                misconceptions.append(tag)
+                lines.append(f"❌ {item.get('question')} — {item.get('rationale')}")
+                lines.append(f"Почему важно в практике: {item.get('why_in_practice')}")
+        score = max(0, min(100, score))
+        unique_mis = sorted(set(misconceptions))[:8]
+        next_step = "/fix_gaps" if score < 70 else "/today"
+        return CheckpointResult(score, unique_mis, next_step, "\n".join(lines), items)
+
+    def build_remediation_plan(self, *, weak_skills: list[str], high_risk: bool) -> RemediationPlan:
+        trimmed = [str(x).strip().lower()[:48] for x in weak_skills if str(x).strip()][:3] or ["low_review_retention"]
+        case_focus = trimmed[0]
+        steps = [
+            {"kind": "mini_case", "title": f"Мини-кейс по пробелу: {case_focus}", "command": "/case basic"},
+            {"kind": "card", "title": f"Карточка 1: ключевой триггер ошибки ({case_focus})", "command": "/cards"},
+            {"kind": "card", "title": "Карточка 2: red flags и эскалация", "command": "/cards"},
+            {"kind": "card", "title": "Карточка 3: безопасная коммуникация с владельцем", "command": "/cards"},
+            {"kind": "micro_quiz", "title": "Микро-квиз из 3 вопросов", "command": "/quiz"},
+        ]
+        return RemediationPlan(trimmed, steps, bool(high_risk), "/today light")
 
     def _difficulty_from_skill_map(self, skill_map: dict[str, dict[str, float | int | str]]) -> str:
         if not skill_map:
@@ -419,6 +760,15 @@ class LearningService:
         if topic_id is not None:
             topic_row = db.execute(select(Topic.title).where(Topic.id == topic_id)).one_or_none()
             topic_title = topic_row[0] if topic_row else None
+        user_row = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+        mastery_snapshot = self.topic_mastery_snapshot(user_settings=(user_row.settings if user_row else {}), topic_id=topic_id)
+        mastery_score = self._safe_int(mastery_snapshot.get("score"), 55)
+        if mastery_score < 45:
+            difficulty_band = "easy"
+            progression_mode = "recovery"
+        elif mastery_score >= 80 and difficulty_band != "easy":
+            difficulty_band = "hard"
+            progression_mode = "progression_up"
 
         used_fallback = not bool(due_cards or all_cards)
         if used_fallback:
@@ -545,7 +895,7 @@ class LearningService:
                     mini_case=f"День {day_idx}: {route.mini_case}",
                     review_target=review_target,
                     quiz_target=quiz_target,
-                    planned_commands=["/today", "/case", "/review", "/quiz"],
+                    planned_commands=["/today", "/case", "/review"],
                 )
             )
         return WeeklyLearningPlan(

@@ -4,6 +4,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path (Join-Path $scriptDir "..\..")).Path
@@ -40,11 +43,21 @@ function Test-ReadyEndpoint {
 }
 
 function Repair-UnhealthyServices {
-    $psOutput = docker compose ps
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $psOutput = docker compose ps 2>&1
+    $ErrorActionPreference = $prevEap
     $hasUnhealthy = ($psOutput | Select-String -Pattern "unhealthy") -ne $null
     if ($hasUnhealthy) {
         Write-Log "Detected unhealthy service(s). Restarting bot service."
-        docker compose restart bot | Tee-Object -FilePath $logFile -Append
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        cmd /c "docker compose restart bot" 2>$null | Tee-Object -FilePath $logFile -Append
+        $restartExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
+        if ($restartExit -ne 0) {
+            throw "docker compose restart bot failed (exit code: $restartExit)"
+        }
         Start-Sleep -Seconds 5
     }
 }
@@ -56,23 +69,40 @@ try {
     docker info | Out-Null
     Write-Log "Docker engine is reachable."
 
-    docker compose up -d | Tee-Object -FilePath $logFile -Append
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    cmd /c "docker compose up -d" 2>$null | Tee-Object -FilePath $logFile -Append
+    $composeExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+    if ($composeExit -ne 0) {
+        throw "docker compose up -d failed (exit code: $composeExit)"
+    }
     Write-Log "docker compose up -d completed."
     Repair-UnhealthyServices
 
-    $readyOk = Test-ReadyEndpoint
+    $readyOk = Test-ReadyEndpoint -MaxAttempts 20 -SleepSeconds 6
     if (-not $readyOk) {
         Write-Log "Service readiness failed. Capturing recent compose logs."
-        docker compose logs --since 20m backend bot media-worker db redis | Tee-Object -FilePath $logFile -Append
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        docker compose ps 2>&1 | Tee-Object -FilePath $logFile -Append
+        docker compose logs --since 20m backend bot media-worker db redis 2>&1 | Tee-Object -FilePath $logFile -Append
+        $ErrorActionPreference = $prevEap
         throw "Ready endpoint did not become healthy."
     }
 
     if ($DeepChecks) {
         Write-Log "Running deep preflight checks: --db --schema"
-        python scripts/preflight_check.py --db --schema | Tee-Object -FilePath $logFile -Append
+        python scripts/preflight_check.py --db --schema 2>&1 | Tee-Object -FilePath $logFile -Append
+        if ($LASTEXITCODE -ne 0) {
+            throw "Deep preflight checks failed (exit code: $LASTEXITCODE)"
+        }
     } else {
         Write-Log "Running quick preflight checks: --db"
-        python scripts/preflight_check.py --db | Tee-Object -FilePath $logFile -Append
+        python scripts/preflight_check.py --db 2>&1 | Tee-Object -FilePath $logFile -Append
+        if ($LASTEXITCODE -ne 0) {
+            throw "Quick preflight checks failed (exit code: $LASTEXITCODE)"
+        }
     }
 
     Write-Log "ensure_stack.ps1 finished successfully."

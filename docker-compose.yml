@@ -1,11 +1,24 @@
+name: vetstudy
+
+x-app-common: &app-common
+  image: vetstudy/app:local
+  pull_policy: never
+  env_file:
+    - path: .env
+      format: raw
+  volumes:
+    - ./:/app
+  restart: unless-stopped
+  labels:
+    com.vetstudy.project: "vetstudy"
+    com.vetstudy.stack: "beta"
+
 services:
   backend:
+    <<: *app-common
     build:
       context: .
       dockerfile: Dockerfile
-    env_file:
-      - path: .env
-        format: raw
     depends_on:
       db:
         condition: service_healthy
@@ -13,10 +26,11 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
-    volumes:
-      - ./:/app
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
-    restart: unless-stopped
+    labels:
+      com.vetstudy.project: "vetstudy"
+      com.vetstudy.stack: "beta"
+      com.vetstudy.role: "backend"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3).read()\""]
       interval: 20s
@@ -24,19 +38,15 @@ services:
       retries: 10
 
   bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - path: .env
-        format: raw
+    <<: *app-common
     depends_on:
       backend:
         condition: service_healthy
-    volumes:
-      - ./:/app
     command: sh -c "python -m app.run_polling"
-    restart: unless-stopped
+    labels:
+      com.vetstudy.project: "vetstudy"
+      com.vetstudy.stack: "beta"
+      com.vetstudy.role: "bot"
     healthcheck:
       test:
         [
@@ -49,21 +59,17 @@ services:
       start_period: 20s
 
   media-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - path: .env
-        format: raw
+    <<: *app-common
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - ./:/app
     command: sh -c "python -m app.media.worker"
-    restart: unless-stopped
+    labels:
+      com.vetstudy.project: "vetstudy"
+      com.vetstudy.stack: "beta"
+      com.vetstudy.role: "media-worker"
     healthcheck:
       test: ["CMD-SHELL", "python -m app.media.worker --diagnose --fail-on-stall"]
       interval: 45s
@@ -72,7 +78,8 @@ services:
       start_period: 20s
 
   db:
-    image: pgvector/pgvector:pg16
+    image: vetstudy/pgvector:pg16-local
+    pull_policy: never
     environment:
       POSTGRES_DB: vetstudy
       POSTGRES_USER: postgres
@@ -82,6 +89,10 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
+    labels:
+      com.vetstudy.project: "vetstudy"
+      com.vetstudy.stack: "beta"
+      com.vetstudy.role: "db"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d vetstudy"]
       interval: 10s
@@ -89,13 +100,18 @@ services:
       retries: 10
 
   redis:
-    image: redis:7-alpine
+    image: vetstudy/redis:7-alpine-local
+    pull_policy: never
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
     volumes:
       - redisdata:/data
     restart: unless-stopped
+    labels:
+      com.vetstudy.project: "vetstudy"
+      com.vetstudy.stack: "beta"
+      com.vetstudy.role: "redis"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s

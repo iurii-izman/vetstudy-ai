@@ -273,7 +273,8 @@ class LLMRouter:
         return [self.primary, self.fallback], "n/a", f"purpose={purpose}"
 
     def _is_high_risk_answer(self, messages: list[dict[str, str]], metadata: dict[str, Any]) -> tuple[bool, str]:
-        safety = (metadata or {}).get("safety") or {}
+        safety = dict((metadata or {}).get("safety") or {})
+        has_explicit_safety = bool(safety) or "intent" in metadata or "risk_tags" in metadata
         intent = str(safety.get("intent") or metadata.get("intent") or "").strip()
         risk_tags = safety.get("risk_tags")
         if risk_tags is None:
@@ -283,8 +284,12 @@ class LLMRouter:
             return True, f"intent={intent}"
         if tags:
             return True, f"risk_tags={','.join(tags)}"
+        if has_explicit_safety:
+            # The upstream pipeline already classified this request; do not
+            # re-classify based on full prompt text (can contain policy words).
+            return False, f"intent={intent or 'general_education'}"
 
-        text = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
+        text = self._last_user_message(messages)
         gate_result = SafetyGate().check(text)
         if gate_result.intent in self.HIGH_RISK_INTENTS:
             return True, f"intent={gate_result.intent}"
@@ -329,8 +334,17 @@ class LLMRouter:
         intent = str(safety.get("intent") or metadata.get("intent") or "").strip()
         if intent:
             return intent
-        text = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
+        if safety or "intent" in metadata or "risk_tags" in metadata:
+            return "general_education"
+        text = self._last_user_message(messages)
         return SafetyGate().check(text).intent
+
+    @staticmethod
+    def _last_user_message(messages: list[dict[str, str]]) -> str:
+        for item in reversed(messages):
+            if item.get("role") == "user":
+                return str(item.get("content", "") or "")
+        return ""
 
     def _build_high_risk_chain(self) -> list[Any]:
         chain: list[Any] = []
@@ -338,7 +352,7 @@ class LLMRouter:
 
         if self.settings.llm_high_risk_provider and self.settings.llm_high_risk_model:
             chain.append(_build_provider(self.settings.llm_high_risk_provider, self.settings.llm_high_risk_model, self.settings))
-        if self.settings.gemini_api_key:
+        if self.settings.llm_enable_gemini_route_boosters and self.settings.gemini_api_key:
             chain.append(_build_provider("gemini", "gemini-2.5-pro", self.settings))
         chain.append(self.fallback)
         return self._dedupe_chain(chain)
@@ -349,7 +363,7 @@ class LLMRouter:
 
         if self.settings.llm_low_risk_provider and self.settings.llm_low_risk_model:
             chain.append(_build_provider(self.settings.llm_low_risk_provider, self.settings.llm_low_risk_model, self.settings))
-        if self.settings.gemini_api_key:
+        if self.settings.llm_enable_gemini_route_boosters and self.settings.gemini_api_key:
             chain.append(_build_provider("gemini", "gemini-2.5-flash", self.settings))
         chain.append(self.fallback)
         return self._dedupe_chain(chain)

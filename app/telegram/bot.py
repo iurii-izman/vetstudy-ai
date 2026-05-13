@@ -22,6 +22,7 @@ BOT_COMMANDS = [
     BotCommand(command="case", description="Виртуальные клинические кейсы"),
     BotCommand(command="case_answer", description="Отправить анализ кейса"),
     BotCommand(command="today", description="Дневной учебный маршрут"),
+    BotCommand(command="continue", description="Продолжить с прошлого шага"),
     BotCommand(command="plan_week", description="Персональный план на 7 дней"),
     BotCommand(command="cards", description="Сгенерировать карточки"),
     BotCommand(command="quiz", description="Сгенерировать тест"),

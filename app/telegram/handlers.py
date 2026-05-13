@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import hashlib
 import logging
 from pathlib import Path
+import re
 from uuid import UUID, uuid4
 
 from aiogram import F, Router
@@ -26,10 +27,11 @@ from app.evidence import EvidenceService
 from app.errors import is_retryable_db_error, map_pipeline_error
 from app.quotas import QuotaGuard
 from sqlalchemy.exc import SQLAlchemyError
+from app.observability import safe_user_id
 from app.services import llm_router, prompt_manager, safety_gate
 from app.telegram.callbacks import parse_callback_data as _parse_callback_data
 from app.telegram.callbacks import callback_data as _signed_callback_data
-from app.telegram.ui import build_ai_reply_keyboard, build_main_menu_reply_keyboard, build_review_keyboard
+from app.telegram.ui import build_ai_reply_keyboard, build_learning_cta_keyboard, build_main_menu_reply_keyboard, build_review_keyboard
 from app.telegram.formatting import TELEGRAM_HTML_PARSE_MODE, format_ai_answer_for_telegram, split_for_telegram, strip_telegram_html
 from app.telegram.onboarding import ONBOARDING_STEPS, REGION_VALUES, RESPONSE_DENSITY_VALUES, SPECIES_VALUES
 from app.telegram.onboarding import apply_response_density as _apply_response_density
@@ -63,6 +65,11 @@ DEFAULT_SUBJECTS = [
     ("anatomy", "Анатомия", "Фокус на структурной логике, ориентирах и экзаменационных связях."),
     ("general", "Общее", "Общие вопросы, кросс-темы и быстрые уточнения."),
 ]
+
+EMBEDDED_COMMAND_PATTERN = re.compile(
+    r"^@[\w_]+\s+/(?P<command>[\w_]+)(?:@[\w_]+)?(?:\s+(?P<args>.*))?$",
+    re.IGNORECASE,
+)
 
 
 def _check_allow(message: Message) -> bool:
@@ -304,6 +311,156 @@ def parse_callback_data(data: str):
     return _parse_callback_data(data)
 
 
+def _extract_embedded_command(text: str) -> tuple[str, str] | None:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    match = EMBEDDED_COMMAND_PATTERN.match(raw)
+    if not match:
+        return None
+    command = (match.group("command") or "").strip().lower()
+    args = (match.group("args") or "").strip()
+    if not command:
+        return None
+    return command, args
+
+
+async def _dispatch_embedded_command(message: Message, *, command: str, args: str) -> bool:
+    if command == "today":
+        await cmd_today(message, CommandObject(command="today", args=args))
+        return True
+    if command == "case":
+        await cmd_case(message, CommandObject(command="case", args=args))
+        return True
+    if command == "review":
+        await cmd_review(message)
+        return True
+    if command == "status":
+        await cmd_status(message)
+        return True
+    return False
+
+
+def _safety_metadata_from_assistant_message(message_row) -> dict[str, object]:
+    meta = dict(getattr(message_row, "metadata_", {}) or {})
+    trace = dict(meta.get("why_trace") or {})
+    intent = trace.get("risk_intent")
+    risk_tags = list(trace.get("risk_tags") or [])
+    if not intent:
+        safety = dict(meta.get("safety") or {})
+        intent = safety.get("intent")
+        risk_tags = list(safety.get("risk_tags") or risk_tags)
+    return {
+        "intent": intent or "general_education",
+        "risk_tags": [str(tag) for tag in risk_tags if str(tag).strip()],
+    }
+
+
+def _user_hash_salt() -> str:
+    return str(getattr(get_settings(), "user_id_hash_salt", "") or "")
+
+
+def _learning_cta_context(*, effective_mode: str, high_risk: bool) -> str:
+    if high_risk:
+        return "safety"
+    if effective_mode == "evidence":
+        return "evidence"
+    return "learning"
+
+
+def _compact_session_history(history_rows: list) -> tuple[list[str], bool, int]:
+    full = [f"{row.role}: {row.content[:220]}" for row in history_rows]
+    total_chars = sum(len(item) for item in full)
+    if len(full) <= 8 and total_chars <= 1800:
+        return full, False, 0
+    head = full[:2]
+    tail = full[-4:]
+    middle = full[2:-4]
+    summary = " | ".join(item[:90] for item in middle[:6]) if middle else ""
+    compacted = [*head, f"summary: {summary[:450]}", *tail]
+    saved = max(0, (total_chars - sum(len(item) for item in compacted)) // 4)
+    return compacted, True, saved
+
+
+def _save_resume_state(*, user, branch: str, topic_id, metadata: dict | None = None) -> None:
+    settings = dict(user.settings or {})
+    learning = dict(settings.get("learning") or {})
+    learning["resume_state"] = {
+        "branch": branch,
+        "topic_id": str(topic_id) if topic_id else None,
+        "updated_at": datetime.now(UTC).isoformat(),
+        "meta": metadata or {},
+    }
+    settings["learning"] = learning
+    user.settings = settings
+
+
+def _weak_skills_from_settings(user) -> list[str]:
+    return [str(x).strip() for x in ((user.settings or {}).get("weak_skills") or []) if str(x).strip()]
+
+
+def _learning_experiment_tags(user) -> dict:
+    learning = dict(((user.settings or {}).get("learning") or {}))
+    exp = dict(learning.get("experiment") or {})
+    return {
+        "experiment_id": str(exp.get("experiment_id") or "adaptive_mastery_loop_v1"),
+        "variant": str(exp.get("variant") or "A"),
+    }
+
+
+def _track_learning_event(analytics: ProductAnalyticsService, *, user, event_name: str, topic_id=None, properties: dict | None = None) -> None:
+    props = dict(properties or {})
+    if event_name.startswith(("learning_", "checkpoint_", "remediation_", "recovery_", "progression_", "mastery_", "weak_skill_")) or event_name in {
+        "overload_guard_triggered",
+        "resume_requested",
+        "resume_branch_selected",
+        "resume_completed",
+        "weekly_route_generated",
+        "weekly_route_completed",
+        "weekly_plan_opened",
+        "weekly_recap_opened",
+        "streak_milestone_reached",
+    }:
+        props.update(_learning_experiment_tags(user))
+    analytics.track(user_id=user.id, topic_id=topic_id, event_name=event_name, properties=props)
+
+
+def _mastery_route_status_text(*, intensity: str, reason: str) -> str:
+    mapping = {
+        "light": "light",
+        "standard": "standard",
+        "intensive": "intensive",
+    }
+    label = mapping.get(intensity, "standard")
+    return f"Маршрут дня: {label} (reason: {reason})"
+
+
+def _checkpoint_state(user) -> dict:
+    learning = dict(((user.settings or {}).get("learning") or {}))
+    return dict(learning.get("checkpoint_state") or {})
+
+
+def _set_checkpoint_state(user, state: dict | None) -> None:
+    settings = dict(user.settings or {})
+    learning = dict(settings.get("learning") or {})
+    if state:
+        learning["checkpoint_state"] = state
+    else:
+        learning.pop("checkpoint_state", None)
+    settings["learning"] = learning
+    user.settings = settings
+
+
+def _render_checkpoint_question(item: dict, *, idx: int, total: int) -> str:
+    lines = [f"Checkpoint Q{idx}/{total}", item.get("question", "")]
+    if item.get("type") == "mcq":
+        lines.extend(item.get("options") or [])
+        lines.append("Ответь буквой A/B/C/D.")
+    else:
+        lines.append("Ответь коротко (1-3 предложения).")
+    return "\n".join(lines)
+
+
 def _build_document_learning_nudge(*, filename: str, chunks: list[str]) -> str:
     lines = [
         f"Документ `{filename}` проиндексирован.",
@@ -359,7 +516,7 @@ async def _answer_telegram_html(message: Message, text: str, **kwargs) -> None:
         await message.answer(strip_telegram_html(text), **kwargs)
 
 
-async def _send_ai_answer(message: Message, answer: str, *, with_keyboard: bool = True) -> None:
+async def _send_ai_answer(message: Message, answer: str, *, with_keyboard: bool = True, learning_context: str = "learning") -> None:
     chunks = split_for_telegram(answer)
     for idx, chunk in enumerate(chunks):
         reply_markup = _build_ai_reply_keyboard() if with_keyboard and idx == len(chunks) - 1 else None
@@ -368,6 +525,8 @@ async def _send_ai_answer(message: Message, answer: str, *, with_keyboard: bool 
             format_ai_answer_for_telegram(chunk),
             reply_markup=reply_markup,
         )
+    if with_keyboard:
+        await message.answer("Выберите следующий учебный шаг:", reply_markup=build_learning_cta_keyboard(learning_context))
 
 
 async def _run_text_pipeline(message: Message, user, topic, text: str, *, metadata: dict | None = None):
@@ -414,6 +573,13 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 analytics.track(
                     user_id=user.id,
                     topic_id=topic.id,
+                    session_id=session.id,
+                    event_name="safety_clarification_started",
+                    properties={"source": "safety_gate", "questions": len(next_questions)},
+                )
+                analytics.track(
+                    user_id=user.id,
+                    topic_id=topic.id,
                     event_name="journey_drop_detected",
                     properties={"reason": "safety_block", "stage": _infer_journey_state(user)},
                 )
@@ -426,7 +592,23 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                 for item in search_results
             ]
             subject = SubjectRepo(db).get_by_id(topic.subject_id)
-            history_rows = MessageRepo(db).recent_for_session(session.id, limit=6)
+            history_rows = MessageRepo(db).recent_for_session(session.id, limit=20)
+            history_compacted, compacted, saved_tokens_estimate = _compact_session_history(history_rows)
+            if compacted:
+                analytics.track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    session_id=session.id,
+                    event_name="context_compacted",
+                    properties={"saved_tokens_estimate": saved_tokens_estimate},
+                )
+                analytics.track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    session_id=session.id,
+                    event_name="context_compaction_tokens_saved_estimate",
+                    properties={"tokens_saved_estimate": saved_tokens_estimate},
+                )
             high_risk = evidence.is_high_risk(text, getattr(safety, "risk_tags", []))
             analytics.track(
                 user_id=user.id,
@@ -449,13 +631,30 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                     properties={"risk_tags": getattr(safety, "risk_tags", [])},
                 )
             effective_mode = "evidence" if (session.mode == "evidence" or high_risk) else session.mode
+            retrieval_titles = [str(item.source_title or "-")[:80] for item in search_results[:3]]
+            logger.info(
+                "telegram_pipeline_trace",
+                extra={
+                    "event": "telegram_pipeline_trace",
+                    "telegram_user_id": safe_user_id(user.id, _user_hash_salt()),
+                    "topic_id": str(topic.id),
+                    "safety_intent": getattr(safety, "intent", None),
+                    "safety_action": getattr(safety, "action", None),
+                    "safety_allowed": bool(getattr(safety, "allowed", False)),
+                    "risk_tags_count": len(list(getattr(safety, "risk_tags", []) or [])),
+                    "retrieval_results": len(search_results),
+                    "retrieval_titles": "|".join(retrieval_titles),
+                    "effective_mode": effective_mode,
+                    "high_risk": bool(high_risk),
+                },
+            )
             preferred_sources = evidence.preferred_sources(region=profile["region"], species_focus=profile["species_focus"])
             prompt = prompt_manager.build(
                 mode=effective_mode,
                 subject=subject.slug if subject else "general",
                 user_message=text,
                 memory_chunks=memory_chunks,
-                session_history=[f"{row.role}: {row.content[:200]}" for row in history_rows],
+                session_history=history_compacted,
                 region=profile["region"],
                 species_focus=profile["species_focus"],
                 evidence_preference=", ".join(preferred_sources) if preferred_sources else None,
@@ -537,9 +736,27 @@ async def _run_text_pipeline(message: Message, user, topic, text: str, *, metada
                     properties={"response_density": profile["response_density"]},
                 )
             needs_followup = bool((evidence_payload or {}).get("status") in {"needs_manual_check", "partially_verified"})
-            await _send_ai_answer(message, rendered_answer)
+            if compacted:
+                await message.answer("Контекст свернут для скорости/стоимости.")
+            learning_context = _learning_cta_context(effective_mode=effective_mode, high_risk=high_risk)
+            await _send_ai_answer(message, rendered_answer, learning_context=learning_context)
+            analytics.track(
+                user_id=user.id,
+                topic_id=topic.id,
+                session_id=session.id,
+                event_name="learning_cta_shown",
+                properties={"context": learning_context},
+            )
+            _save_resume_state(user=user, branch="last_topic", topic_id=topic.id, metadata={"context": learning_context})
             if needs_followup and followup_questions:
                 guidance = "Чтобы повысить уверенность ответа, уточните:\n" + "\n".join(f"- {q}" for q in followup_questions)
+                analytics.track(
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    session_id=session.id,
+                    event_name="safety_clarification_started",
+                    properties={"questions": len(followup_questions)},
+                )
                 await message.answer(guidance, reply_markup=_guided_clarification_keyboard())
             await _try_ingest_answer(
                 memory,
@@ -692,7 +909,7 @@ async def cmd_help(message: Message):
     await message.answer(
         "Онбординг:\n/start\n/status\n/topics\n/create_default_topics\n/bind_topic <slug_or_name>\n\n"
         "Сессия:\n/new\n/mode\n/evidence\n/why\n/save\n/search\n/summary\n/profile\n\n"
-        "Обучение:\n/today [light|standard|intensive]\n/plan_week\n/cards\n/review\n/quiz\n/export\n\n"
+        "Обучение:\n/today [light|standard|intensive]\n/continue\n/plan_week\n/cards\n/review\n/quiz\n/export\n\n"
         "Отчет:\n/weekly\n\n"
         "Клинические кейсы:\n/case — выбрать виртуальный кейс\n/case_answer — отправить анализ на оценку\n\n"
         "Система:\n/docs\n/help",
@@ -1261,6 +1478,23 @@ async def cmd_quiz(message: Message):
             await message.answer("Нет ответа для генерации quiz.")
             return
         items = await LearningService().generate_quiz_structured(llm_router=llm_router, db=db, user_id=user.id, text=last.content, count=7)
+        quiz_score = max(40, min(85, 50 + len(items) * 5))
+        mastery, weak_skills = LearningService().update_mastery_for_topic(
+            db=db,
+            user_id=user.id,
+            topic_id=topic.id,
+            topic_title=topic.title,
+            quiz_score_percent=quiz_score,
+        )
+        _track_learning_event(
+            ProductAnalyticsService(db),
+            user=user,
+            topic_id=topic.id,
+            event_name="mastery_updated",
+            properties={"score": mastery.get("score"), "confidence": mastery.get("confidence"), "source": "quiz"},
+        )
+        if weak_skills:
+            _track_learning_event(ProductAnalyticsService(db), user=user, topic_id=topic.id, event_name="weak_skill_detected", properties={"tags": weak_skills[:6]})
         lines = ["Тест:"]
         for item in items:
             lines.append(item.question)
@@ -1268,6 +1502,7 @@ async def cmd_quiz(message: Message):
             lines.append(f"Ответ: {item.correct_answer}")
             lines.append(f"Пояснение: {item.explanation}")
             lines.append("")
+        lines.append(f"Checkpoint proxy score: {quiz_score}")
         await message.answer("\n".join(lines).strip())
     finally:
         db.close()
@@ -1299,6 +1534,76 @@ async def cmd_review(message: Message):
         db.close()
 
 
+@router.message(Command("checkpoint"))
+async def cmd_checkpoint(message: Message):
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        chat_db = ChatDBService(db)
+        user = chat_db.ensure_user(message.from_user.id, message.from_user.full_name if message.from_user else None)
+        topic = chat_db.get_topic_for_chat_thread(message.chat.id, message.message_thread_id)
+        if not topic or not topic.subject_id:
+            await message.answer(_topic_required_text(message.message_thread_id))
+            return
+        analytics = ProductAnalyticsService(db)
+        _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="checkpoint_started")
+        session = SessionRepo(db).get_active(user.id, topic.id)
+        last = MessageRepo(db).last_assistant(session.id) if session else None
+        context = (last.content if last else topic.summary or topic.title)
+        learning = LearningService()
+        items = await learning.generate_checkpoint(llm_router=llm_router, db=db, user_id=user.id, topic_title=topic.title, context=context)
+        if not items:
+            await message.answer("Не удалось собрать checkpoint. Попробуй /fix_gaps и затем снова /checkpoint.")
+            return
+        _set_checkpoint_state(
+            user,
+            {
+                "topic_id": str(topic.id),
+                "items": items,
+                "answers": {},
+                "current_index": 0,
+                "started_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        db.commit()
+        await message.answer("Checkpoint стартовал. Ответы будут оценены после всех 5 вопросов.")
+        await message.answer(_render_checkpoint_question(items[0], idx=1, total=len(items)))
+    finally:
+        db.close()
+
+
+@router.message(Command("fix_gaps"))
+async def cmd_fix_gaps(message: Message):
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        chat_db = ChatDBService(db)
+        user = chat_db.ensure_user(message.from_user.id, message.from_user.full_name if message.from_user else None)
+        topic = chat_db.get_topic_for_chat_thread(message.chat.id, message.message_thread_id)
+        if not topic or not topic.subject_id:
+            await message.answer(_topic_required_text(message.message_thread_id))
+            return
+        weak_skills = _weak_skills_from_settings(user)
+        route = LearningService().build_daily_route(db=db, user_id=user.id, topic_id=topic.id, mode="light")
+        high_risk = route.high_risk_block_count > 0
+        plan = LearningService().build_remediation_plan(weak_skills=weak_skills or route.weak_topics, high_risk=high_risk)
+        analytics = ProductAnalyticsService(db)
+        _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="remediation_plan_generated", properties={"weak_skills": plan.weak_skills, "steps": len(plan.steps), "safety_framing": plan.safety_framing})
+        lines = ["Adaptive remediation playlist:"]
+        if plan.safety_framing:
+            lines.append("Safety framing: high-risk topic detected, no numeric shortcut dosing, verify source + patient context.")
+        for idx, step in enumerate(plan.steps, start=1):
+            lines.append(f"{idx}) {step['title']} -> {step['command']}")
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="remediation_step_completed", properties={"step_kind": step["kind"], "step_index": idx})
+        _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="remediation_plan_completed", properties={"recommended_next_step": plan.recommended_next_step})
+        lines.append(f"Next: {plan.recommended_next_step}")
+        await message.answer("\n".join(lines))
+    finally:
+        db.close()
+
+
 @router.message(Command("today"))
 async def cmd_today(message: Message, command: CommandObject | None = None):
     if await _deny_if_not_allowed(message):
@@ -1314,9 +1619,17 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
         requested_mode = ((command.args or "").strip().lower() if command else "") or "standard"
         route = LearningService().build_daily_route(db=db, user_id=user.id, topic_id=topic.id, mode=requested_mode)
         streak_days, relaunch_days = LearningService().compute_streak(db=db, user_id=user.id)
+        recovery = LearningService().select_recovery_route(
+            due_count=route.due_count,
+            relaunch_days=relaunch_days,
+            high_risk_block_count=route.high_risk_block_count,
+            negative_feedback_count=route.negative_feedback_count,
+            streak_days=streak_days,
+        )
         analytics = ProductAnalyticsService(db)
-        analytics.track(
-            user_id=user.id,
+        _track_learning_event(
+            analytics,
+            user=user,
             topic_id=topic.id,
             event_name="learning_route_opened",
             properties={
@@ -1333,8 +1646,15 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
                 "progression_mode": route.progression_mode,
                 "recovery_mode": route.recovery_mode,
                 "why_personalization": route.why_personalization,
+                "route_status": recovery.intensity,
+                "route_reason": recovery.reason,
             },
         )
+        _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="recovery_route_selected", properties={"status": recovery.intensity, "reason": recovery.reason, "route": recovery.route})
+        if recovery.route == "overload_light":
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="overload_guard_triggered", properties={"reason": recovery.reason})
+        if recovery.route == "progression_up":
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="progression_upgraded", properties={"reason": recovery.reason})
         settings = dict(user.settings or {})
         learning = dict(settings.get("learning") or {})
         learning["last_route"] = {
@@ -1347,9 +1667,9 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
         user.settings = settings
         db.commit()
         if streak_days in {3, 7, 14, 30}:
-            analytics.track(user_id=user.id, topic_id=topic.id, event_name="streak_milestone_reached", properties={"days": streak_days})
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="streak_milestone_reached", properties={"days": streak_days})
         if relaunch_days > 0:
-            analytics.track(user_id=user.id, topic_id=topic.id, event_name="learning_relaunched", properties={"after_days": relaunch_days})
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="learning_relaunched", properties={"after_days": relaunch_days})
             analytics.track(
                 user_id=user.id,
                 topic_id=topic.id,
@@ -1358,6 +1678,7 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
             )
         if relaunch_days >= 3:
             analytics.track(user_id=user.id, topic_id=topic.id, event_name="return_after_dropout_nudge", properties={"dropout_days": relaunch_days})
+            analytics.track(user_id=user.id, topic_id=topic.id, event_name="comeback_mode_triggered", properties={"dropout_days": relaunch_days})
         overload = bool(route.due_count >= 6 or route.negative_feedback_count >= 2)
         nudges = ProactiveNudgeEngine().choose(
             db=db,
@@ -1377,6 +1698,7 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
         journey_next = _next_journey_step(user=user, context="today")
         lines = [
             f"Маршрут на {route.plan_minutes} минут ({route.mode}):",
+            _mastery_route_status_text(intensity=recovery.intensity, reason=recovery.reason),
             f"1) Мини-кейс: {route.mini_case}",
             f"2) Препарат/риск: {route.drug_risk}",
             f"3) Повтор: карточки к сроку {route.due_count}",
@@ -1402,11 +1724,68 @@ async def cmd_today(message: Message, command: CommandObject | None = None):
             lines.append("Мягкий сценарий возврата: начни с /today light, затем закрой 2 карточки через /review.")
         if route.high_risk_block_count >= 3:
             lines.append("Много high-risk блокировок: переключаемся на безопасный тренировочный кейс /case basic.")
+        if overload:
+            lines.append("Light-path активирован: закрой только 2 карточки и 1 мини-кейс (15-20 минут, 3 шага максимум).")
+        lines.append("Микро-цель: 1) мини-кейс 2) 3 карточки 3) 1 рефлексия.")
         if nudges:
             lines.append("Proactive nudges:")
             for item in nudges:
                 lines.append(f"- {item.text}")
         await message.answer("\n".join(lines), reply_markup=_next_step_keyboard("learning"))
+    finally:
+        db.close()
+
+
+@router.message(Command("continue"))
+async def cmd_continue(message: Message):
+    if await _deny_if_not_allowed(message):
+        return
+    db = new_session()
+    try:
+        chat_db = ChatDBService(db)
+        user = chat_db.ensure_user(message.from_user.id, message.from_user.full_name if message.from_user else None)
+        topic = chat_db.get_topic_for_chat_thread(message.chat.id, message.message_thread_id)
+        if not topic or not topic.subject_id:
+            await message.answer(_topic_required_text(message.message_thread_id))
+            return
+        analytics = ProductAnalyticsService(db)
+        _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="resume_requested")
+        active_case = _get_user_case_id(user)
+        if active_case:
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="resume_branch_selected", properties={"branch": "active_case"})
+            await cmd_case(message, CommandObject(command="case", args=active_case))
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="resume_completed", properties={"branch": "active_case"})
+            return
+        mastery = LearningService().topic_mastery_snapshot(user_settings=(user.settings or {}), topic_id=topic.id)
+        weak_skills = _weak_skills_from_settings(user)
+        if mastery and int(mastery.get("score", 55) or 55) < 50 and weak_skills:
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="resume_branch_selected", properties={"branch": "fix_gaps_mastery", "mastery_score": int(mastery.get("score", 55) or 55)})
+            _save_resume_state(user=user, branch="fix_gaps_mastery", topic_id=topic.id, metadata={"weak_skills": weak_skills[:4]})
+            db.commit()
+            await cmd_fix_gaps(message)
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="resume_completed", properties={"branch": "fix_gaps_mastery"})
+            return
+        due_cards = FlashcardRepo(db).list_due(user_id=user.id, topic_id=topic.id, now=datetime.now(UTC), limit=1)
+        if due_cards:
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="resume_branch_selected", properties={"branch": "review_due"})
+            _save_resume_state(user=user, branch="review_due", topic_id=topic.id)
+            db.commit()
+            await cmd_review(message)
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="resume_completed", properties={"branch": "review_due"})
+            return
+        weak_topics = LearningService().build_daily_route(db=db, user_id=user.id, topic_id=topic.id, mode="light").weak_topics
+        if weak_topics:
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="resume_branch_selected", properties={"branch": "weak_topic_today"})
+            _save_resume_state(user=user, branch="weak_topic_today", topic_id=topic.id, metadata={"weak_topics": weak_topics[:3]})
+            db.commit()
+            await cmd_today(message, CommandObject(command="today", args="light"))
+            _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="resume_completed", properties={"branch": "weak_topic_today"})
+            return
+        _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="resume_branch_selected", properties={"branch": "starter_route"})
+        _save_resume_state(user=user, branch="starter_route", topic_id=topic.id)
+        db.commit()
+        await cmd_today(message, CommandObject(command="today", args="light"))
+        _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="resume_completed", properties={"branch": "starter_route"})
     finally:
         db.close()
 
@@ -1424,8 +1803,10 @@ async def cmd_plan_week(message: Message):
             await message.answer(_topic_required_text(message.message_thread_id))
             return
         plan = LearningService().build_week_plan(db=db, user_id=user.id, topic_id=topic.id)
-        ProductAnalyticsService(db).track(
-            user_id=user.id,
+        analytics = ProductAnalyticsService(db)
+        _track_learning_event(
+            analytics,
+            user=user,
             topic_id=topic.id,
             event_name="weekly_plan_opened",
             properties={
@@ -1438,6 +1819,7 @@ async def cmd_plan_week(message: Message):
                 "why_plan": plan.why_plan,
             },
         )
+        _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="weekly_route_generated", properties={"days": len(plan.days), "micro_goal_steps": 3})
         lines = [
             "Персональный план на 7 дней:",
             f"Streak: {plan.streak_days} дн., overdue карточек: {plan.overdue_count}",
@@ -1466,8 +1848,10 @@ async def cmd_weekly(message: Message):
         chat_db = ChatDBService(db)
         user = chat_db.ensure_user(message.from_user.id, message.from_user.full_name if message.from_user else None)
         recap = LearningService().build_weekly_recap(db=db, user_id=user.id)
-        ProductAnalyticsService(db).track(
-            user_id=user.id,
+        analytics = ProductAnalyticsService(db)
+        _track_learning_event(
+            analytics,
+            user=user,
             event_name="weekly_recap_opened",
             properties={
                 "cards_created": recap.cards_created,
@@ -1476,6 +1860,8 @@ async def cmd_weekly(message: Message):
                 "questions_asked": recap.questions_asked,
             },
         )
+        if recap.cards_reviewed > 0:
+            _track_learning_event(analytics, user=user, event_name="weekly_route_completed", properties={"cards_reviewed": recap.cards_reviewed})
         lines = [
             "Weekly recap (7 дней):",
             f"- Cards created: {recap.cards_created}",
@@ -1729,8 +2115,6 @@ async def cmd_case_answer(message: Message):
             ]
         )
         await _send_ai_answer(message, answer, with_keyboard=False)
-        if message.answers:  # type: ignore[attr-defined]
-            pass
         try:
             await message.answer(
                 "⚠️ <i>Это учебная обратная связь, а не клиническое заключение. "
@@ -1822,6 +2206,14 @@ async def on_ai_action(query: CallbackQuery):
     if await _deny_callback_if_not_allowed(query):
         return
     await query.answer()
+    logger.info(
+        "telegram_callback_action",
+        extra={
+            "event": "telegram_callback_action",
+            "callback_action": parsed.action,
+            "telegram_user_id": safe_user_id(query.from_user.id, _user_hash_salt()),
+        },
+    )
     if parsed.action == "pick":
         db = new_session()
         try:
@@ -1867,12 +2259,23 @@ async def on_ai_action(query: CallbackQuery):
             updated, score = LearningService().apply_review(card=card, action=action)
             updated = FlashcardRepo(db).save(updated)
             ReviewEventRepo(db).add(user_id=user.id, topic_id=card.topic_id, flashcard_id=card.id, event_type=action, score=score, metadata_={"due_at": updated.due_at.isoformat() if updated.due_at else None})
+            topic_row = TopicRepo(db).get_by_id(card.topic_id) if card.topic_id else None
+            mastery, weak_skills = LearningService().update_mastery_for_topic(
+                db=db,
+                user_id=user.id,
+                topic_id=card.topic_id,
+                topic_title=(topic_row.title if topic_row else None),
+                review_score=score,
+            )
             ProductAnalyticsService(db).track(
                 user_id=user.id,
                 topic_id=card.topic_id,
                 event_name="cards_reviewed",
                 properties={"action": action, "score": score},
             )
+            _track_learning_event(ProductAnalyticsService(db), user=user, topic_id=card.topic_id, event_name="mastery_updated", properties={"score": mastery.get("score"), "confidence": mastery.get("confidence"), "source": "review"})
+            if weak_skills:
+                _track_learning_event(ProductAnalyticsService(db), user=user, topic_id=card.topic_id, event_name="weak_skill_detected", properties={"tags": weak_skills[:6]})
             ProductAnalyticsService(db).track(user_id=user.id, topic_id=card.topic_id, event_name="activation_first_review")
             if query.message:
                 await query.message.answer(
@@ -1972,6 +2375,19 @@ async def on_ai_action(query: CallbackQuery):
     if parsed.action == "clarify_quick":
         if not query.message:
             return
+        db = new_session()
+        try:
+            user = UserRepo(db).get_or_create(
+                query.from_user.id,
+                query.from_user.full_name if query.from_user else None,
+            )
+            ProductAnalyticsService(db).track(
+                user_id=user.id,
+                event_name="safety_clarification_completed",
+                properties={"chip": parsed.payload},
+            )
+        finally:
+            db.close()
         templates = {
             "patient": "Заполни: вид= ; вес_кг= ; возраст= ; пол/стерилизация= .",
             "drug": "Заполни: препарат= ; концентрация= ; маршрут= ; частота= ; источник(label/SPC/formulary)= .",
@@ -1979,6 +2395,57 @@ async def on_ai_action(query: CallbackQuery):
         }
         text = templates.get(parsed.payload, "Добавьте минимальные клинические данные: вид, вес, возраст, симптомы, препарат.")
         await query.message.answer(text)
+        return
+    if parsed.action in {"continue_now", "learning_next_step", "learning_mini_case", "learning_three_cards"}:
+        if not query.message:
+            return
+        db = new_session()
+        try:
+            chat_db = ChatDBService(db)
+            user = chat_db.ensure_user(query.from_user.id, query.from_user.full_name if query.from_user else None)
+            topic = chat_db.get_topic_for_chat_thread(query.message.chat.id, query.message.message_thread_id)
+            analytics = ProductAnalyticsService(db)
+            if topic:
+                _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="learning_cta_clicked", properties={"action": parsed.action, "context": parsed.payload})
+                if parsed.payload == "safety" and parsed.action in {"learning_mini_case", "learning_three_cards"}:
+                    analytics.track(
+                        user_id=user.id,
+                        topic_id=topic.id,
+                        event_name="safety_clarification_abandoned",
+                        properties={"redirect_to": parsed.action},
+                    )
+            if parsed.action in {"continue_now", "learning_next_step"}:
+                await cmd_continue(query.message)
+            elif parsed.action == "learning_mini_case":
+                await cmd_case(query.message, CommandObject(command="case", args="basic"))
+            else:
+                if not topic or not topic.subject_id:
+                    await query.message.answer(_topic_required_text(query.message.message_thread_id))
+                    return
+                session = SessionRepo(db).get_active(user.id, topic.id)
+                last = MessageRepo(db).last_assistant(session.id) if session else None
+                if not last:
+                    await query.message.answer("Нет ответа для генерации карточек.")
+                    return
+                raw_cards = await LearningService().generate_cards_structured(
+                    llm_router=llm_router,
+                    db=db,
+                    user_id=user.id,
+                    text=last.content,
+                    count=3,
+                    tags=["cards", "learning_cta"],
+                    source_message_id=str(last.id),
+                )
+                cards = [Flashcard(user_id=user.id, topic_id=topic.id, source_message_id=last.id, front=x["front"], back=x["back"], card_type=x.get("card_type", "fact"), needs_manual_check=x.get("needs_manual_check", False), tags=x.get("tags", []), due_at=datetime.now(UTC), ease=2.5, interval_days=1) for x in raw_cards]
+                if not cards:
+                    await query.message.answer("Не удалось собрать 3 карточки.")
+                    return
+                FlashcardRepo(db).add_many(cards)
+                await query.message.answer("Собрал 3 карточки. Запусти /review для закрепления.")
+            if topic:
+                _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="learning_step_completed", properties={"action": parsed.action})
+        finally:
+            db.close()
         return
     # ── General feedback ────────────────────────────────────────────────────
     if parsed.action in {"fb_up", "fb_down", "fb_error"}:
@@ -2011,6 +2478,17 @@ async def on_ai_action(query: CallbackQuery):
                 event_name="feedback_submitted",
                 properties={"type": {"fb_up": "up", "fb_down": "down", "fb_error": "error"}[parsed.action]},
             )
+            if topic:
+                mastery, weak_skills = LearningService().update_mastery_for_topic(
+                    db=db,
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    topic_title=topic.title,
+                    feedback_type={"fb_up": "up", "fb_down": "down", "fb_error": "error"}[parsed.action],
+                )
+                _track_learning_event(ProductAnalyticsService(db), user=user, topic_id=topic.id, event_name="mastery_updated", properties={"score": mastery.get("score"), "confidence": mastery.get("confidence"), "source": "feedback"})
+                if weak_skills:
+                    _track_learning_event(ProductAnalyticsService(db), user=user, topic_id=topic.id, event_name="weak_skill_detected", properties={"tags": weak_skills[:6]})
             await query.message.answer("Спасибо, feedback сохранен.")
         finally:
             db.close()
@@ -2095,6 +2573,7 @@ async def on_ai_action(query: CallbackQuery):
             mode = "short" if parsed.action == "short" else "deep"
             subject = SubjectRepo(db).get_by_id(topic.subject_id)
             history_rows = MessageRepo(db).recent_for_session(session.id, limit=6)
+            safety_meta = _safety_metadata_from_assistant_message(last)
             prompt = prompt_manager.build(
                 mode=mode,
                 subject=subject.slug if subject else "general",
@@ -2103,7 +2582,13 @@ async def on_ai_action(query: CallbackQuery):
                 session_history=[f"{row.role}: {row.content[:200]}" for row in history_rows],
                 safety_warning=None,
             )
-            answer = await llm_router.generate(db, user.id, prompt, purpose="answer", metadata={"inline_action": parsed.action})
+            answer = await llm_router.generate(
+                db,
+                user.id,
+                prompt,
+                purpose="answer",
+                metadata={"inline_action": parsed.action, "safety": safety_meta},
+            )
             assistant_msg = chat_db.save_assistant_message(session.id, answer, metadata={"topic_id": str(topic.id), "inline_action": parsed.action})
             memory = MemoryService(MemoryRepo(db), topic_repo=TopicRepo(db), embedder=llm_router, chunk_repo=DocumentChunkRepo(db))
             await _send_ai_answer(query.message, answer)
@@ -2136,6 +2621,75 @@ async def on_text(message: Message):
         if not topic or not topic.subject_id:
             await message.answer(_topic_required_text(message.message_thread_id))
             return
+        embedded_command = _extract_embedded_command(message.text or "")
+        if embedded_command:
+            command, args = embedded_command
+            if await _dispatch_embedded_command(message, command=command, args=args):
+                logger.info(
+                    "telegram_command_rerouted",
+                    extra={
+                        "event": "telegram_command_rerouted",
+                        "reason": f"embedded_command:{command}",
+                        "telegram_user_id": safe_user_id(user.id, _user_hash_salt()),
+                    },
+                )
+                return
+        checkpoint = _checkpoint_state(user)
+        if checkpoint and str(checkpoint.get("topic_id")) == str(topic.id):
+            items = list(checkpoint.get("items") or [])
+            answers = dict(checkpoint.get("answers") or {})
+            idx = int(checkpoint.get("current_index", 0) or 0)
+            if 0 <= idx < len(items):
+                current = items[idx]
+                qid = str(current.get("id") or f"q{idx+1}")
+                answers[qid] = (message.text or "").strip()
+                idx += 1
+                if idx < len(items):
+                    checkpoint["answers"] = answers
+                    checkpoint["current_index"] = idx
+                    _set_checkpoint_state(user, checkpoint)
+                    db.commit()
+                    await message.answer(_render_checkpoint_question(items[idx], idx=idx + 1, total=len(items)))
+                    return
+                learning = LearningService()
+                result = learning.score_checkpoint_answers(items=items, answers=answers)
+                weak_detected = learning.detect_weak_skills_for_topic(db=db, user_id=user.id, topic_id=topic.id, topic_title=topic.title)
+                _, weak_skills = learning.update_mastery_for_topic(
+                    db=db,
+                    user_id=user.id,
+                    topic_id=topic.id,
+                    topic_title=topic.title,
+                    quiz_score_percent=result.checkpoint_score,
+                    detected_weak_skills=[*result.misconception_tags, *weak_detected],
+                )
+                analytics = ProductAnalyticsService(db)
+                _track_learning_event(
+                    analytics,
+                    user=user,
+                    topic_id=topic.id,
+                    event_name="checkpoint_completed",
+                    properties={
+                        "checkpoint_score": result.checkpoint_score,
+                        "misconception_tags": result.misconception_tags,
+                        "recommended_next_step": result.recommended_next_step,
+                    },
+                )
+                for tag in result.misconception_tags:
+                    _track_learning_event(analytics, user=user, topic_id=topic.id, event_name="checkpoint_misconception_logged", properties={"tag": tag})
+                _set_checkpoint_state(user, None)
+                db.commit()
+                lines = [
+                    "Checkpoint завершен.",
+                    f"Score: {result.checkpoint_score}/100",
+                    f"Misconceptions: {', '.join(result.misconception_tags) if result.misconception_tags else 'none'}",
+                    f"Recommended next step: {result.recommended_next_step}",
+                    "",
+                    result.breakdown or "Разбор пока недоступен.",
+                    "",
+                    f"Weak skills tracked: {', '.join(weak_skills[:6]) if weak_skills else 'none'}",
+                ]
+                await message.answer("\n".join(lines))
+                return
     finally:
         db.close()
     await _run_text_pipeline(message, user, topic, message.text or "")

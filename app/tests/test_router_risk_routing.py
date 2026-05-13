@@ -39,6 +39,7 @@ def _settings():
     s.llm_low_risk_model = "gemini-2.5-flash-lite"
     s.llm_high_risk_provider = "openai"
     s.llm_high_risk_model = "gpt-5.4-mini"
+    s.llm_enable_gemini_route_boosters = True
     return s
 
 
@@ -134,3 +135,37 @@ def test_high_risk_fallback_uses_gemini_pro_then_default_fallback(monkeypatch):
         )
     )
     assert text == "gemini:gemini-2.5-pro"
+
+
+def test_explicit_general_safety_metadata_beats_prompt_policy_noise(monkeypatch):
+    db = _make_db()
+    settings = _settings()
+    settings.gemini_api_key = ""
+
+    def _build_provider(name: str, model: str, _settings):
+        return StubProvider(name, model)
+
+    monkeypatch.setattr("app.services._build_provider", _build_provider)
+
+    router = LLMRouter(
+        settings=settings,
+        primary=StubProvider("primary", "p"),
+        fallback=StubProvider("fallback", "f"),
+        classification=StubProvider("classification", "c"),
+        summary=StubProvider("summary", "s"),
+        embeddings=StubProvider("embeddings", "e"),
+    )
+    noisy_prompt = (
+        "SYSTEM RULES: токсикология, emergency, interaction.\n"
+        "User asks: объясни базовый осмотр пациента."
+    )
+    text = asyncio.run(
+        router.generate(
+            db,
+            user_id=None,
+            prompt=noisy_prompt,
+            purpose="answer",
+            metadata={"safety": {"intent": "general_education", "risk_tags": []}},
+        )
+    )
+    assert text.startswith("gemini:gemini-2.5-flash-lite")

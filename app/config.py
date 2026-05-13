@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     llm_retry_backoff_s: float = 0.5
     llm_circuit_breaker_failures: int = 2
     llm_circuit_breaker_open_seconds: float = 20.0
+    llm_enable_gemini_route_boosters: bool = True
     llm_max_request_tokens: int = 4096
     llm_max_output_tokens_default: int = 700
     llm_max_output_tokens_low_risk: int = 520

@@ -207,6 +207,28 @@ async def test_message_in_unknown_topic(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_embedded_bot_command_reroutes_instead_of_pipeline(monkeypatch):
+    _patch_minimal_text_flow(monkeypatch, topic=SimpleNamespace(id="t-1", subject_id="sub-1", title="Терапия"))
+    called = {}
+
+    async def _cmd_today(message, command=None):
+        called["args"] = getattr(command, "args", None)
+        await message.answer("rerouted today")
+
+    async def _pipeline_should_not_run(*args, **kwargs):
+        raise AssertionError("on_text should reroute embedded command and skip text pipeline")
+
+    monkeypatch.setattr(handlers, "cmd_today", _cmd_today)
+    monkeypatch.setattr(handlers, "_run_text_pipeline", _pipeline_should_not_run)
+
+    message = FakeMessage(text="@vetprofessor_bot /today standard")
+    await handlers.on_text(message)
+
+    assert called["args"] == "standard"
+    assert any("rerouted today" in item["text"] for item in message.answers)
+
+
+@pytest.mark.asyncio
 async def test_allowlist_for_start(monkeypatch):
     monkeypatch.setattr(
         "app.config.get_settings",
@@ -480,7 +502,29 @@ async def test_split_long_answer(monkeypatch):
     await handlers.on_text(message)
     assert message.answers
     assert all(len(item["text"]) <= 3900 for item in message.answers)
-    assert "density=deep" in message.answers[-1]["text"]
+    assert any("density=deep" in item["text"] for item in message.answers)
+
+
+@pytest.mark.asyncio
+async def test_context_compaction_marks_user_and_tracks(monkeypatch):
+    tracked = []
+    _patch_minimal_text_flow(monkeypatch, topic=SimpleNamespace(id="t-1", subject_id="sub-1", title="Терапия"))
+    monkeypatch.setattr(
+        handlers,
+        "MessageRepo",
+        lambda db: SimpleNamespace(
+            add=lambda *a, **k: SimpleNamespace(id="m-1"),
+            last_assistant=lambda *a, **k: None,
+            recent_for_session=lambda *a, **k: [SimpleNamespace(role="user", content=("очень длинный контекст " * 40)) for _ in range(20)],
+            count_for_session=lambda *a, **k: 1,
+        ),
+    )
+    monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)))
+    monkeypatch.setattr(handlers.llm_router, "generate", lambda *a, **k: _async_return("Ответ"))
+    message = FakeMessage()
+    await handlers.on_text(message)
+    assert any("Контекст свернут" in item["text"] for item in message.answers)
+    assert any(item["event_name"] == "context_compacted" for item in tracked)
 
 
 def test_callback_parsing():
@@ -634,6 +678,10 @@ async def test_callback_save_creates_note(monkeypatch):
 @pytest.mark.asyncio
 async def test_callback_clarify_quick(monkeypatch):
     monkeypatch.setattr(handlers, "get_settings", lambda: SimpleNamespace(allowed_user_ids={7}))
+    tracked = []
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(handlers, "UserRepo", lambda db: SimpleNamespace(get_or_create=lambda *a, **k: SimpleNamespace(id="u-1")))
+    monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)))
     query = SimpleNamespace(
         data=handlers._callback_data("clarify_quick", "drug"),
         from_user=SimpleNamespace(id=7, full_name="U"),
@@ -642,6 +690,74 @@ async def test_callback_clarify_quick(monkeypatch):
     )
     await handlers.on_ai_action(query)
     assert any("препарат=" in item["text"] for item in query.message.answers)
+    assert any(item["event_name"] == "safety_clarification_completed" for item in tracked)
+
+
+@pytest.mark.asyncio
+async def test_continue_prefers_active_case(monkeypatch):
+    tracked = []
+    user = SimpleNamespace(id="u-1", settings={"active_case_id": "vomiting_dog"})
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: user,
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1"),
+        ),
+    )
+    monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)))
+    called = []
+    async def _cmd_case(message, command):
+        called.append(command.args)
+    monkeypatch.setattr(handlers, "cmd_case", _cmd_case)
+    message = FakeMessage(user_id=1, text="/continue")
+    await handlers.cmd_continue(message)
+    assert called == ["vomiting_dog"]
+    events = [item["event_name"] for item in tracked]
+    assert "resume_requested" in events
+    assert "resume_completed" in events
+
+
+@pytest.mark.asyncio
+async def test_callback_learning_three_cards_tracks_completion(monkeypatch):
+    tracked = []
+    monkeypatch.setattr(handlers, "get_settings", lambda: SimpleNamespace(allowed_user_ids={7}))
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={}),
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1"),
+        ),
+    )
+    monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)))
+    monkeypatch.setattr(handlers, "SessionRepo", lambda db: SimpleNamespace(get_active=lambda *a, **k: SimpleNamespace(id="s-1")))
+    monkeypatch.setattr(handlers, "MessageRepo", lambda db: SimpleNamespace(last_assistant=lambda *a, **k: SimpleNamespace(id="m-1", content="answer")))
+    monkeypatch.setattr(
+        handlers.LearningService,
+        "generate_cards_structured",
+        lambda self, **kwargs: _async_return(
+            [
+                {"front": "Q1 long enough", "back": "A1 long enough", "tags": [], "card_type": "fact", "needs_manual_check": False},
+                {"front": "Q2 long enough", "back": "A2 long enough", "tags": [], "card_type": "fact", "needs_manual_check": False},
+                {"front": "Q3 long enough", "back": "A3 long enough", "tags": [], "card_type": "fact", "needs_manual_check": False},
+            ]
+        ),
+    )
+    monkeypatch.setattr(handlers, "FlashcardRepo", lambda db: SimpleNamespace(add_many=lambda cards: None))
+    query = SimpleNamespace(
+        data=handlers._callback_data("learning_three_cards", "learning"),
+        from_user=SimpleNamespace(id=7, full_name="U"),
+        answer=lambda *a, **k: _async_return(None),
+        message=FakeMessage(),
+    )
+    await handlers.on_ai_action(query)
+    assert any("3 карточки" in item["text"] for item in query.message.answers)
+    assert any(item["event_name"] == "learning_cta_clicked" for item in tracked)
+    assert any(item["event_name"] == "learning_step_completed" for item in tracked)
 
 @pytest.mark.asyncio
 async def test_review_shows_leech_hint(monkeypatch):
@@ -666,3 +782,67 @@ async def test_review_shows_leech_hint(monkeypatch):
     await handlers.cmd_review(message)
     assert message.answers
     assert "разбить карточку" in message.answers[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_command_outputs_score(monkeypatch):
+    tracked = []
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={}),
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1", title="Терапия", summary="S"),
+        ),
+    )
+    monkeypatch.setattr(handlers, "SessionRepo", lambda db: SimpleNamespace(get_active=lambda *a, **k: SimpleNamespace(id="s-1")))
+    monkeypatch.setattr(handlers, "MessageRepo", lambda db: SimpleNamespace(last_assistant=lambda *a, **k: SimpleNamespace(content="ctx")))
+    monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)))
+    monkeypatch.setattr(handlers.LearningService, "generate_checkpoint", lambda self, **kwargs: _async_return([{"type": "mcq", "question": "Q1", "correct_answer": "B", "rationale": "R", "misconception_tag": "tag1", "why_in_practice": "W"}]))
+    monkeypatch.setattr(handlers.LearningService, "evaluate_checkpoint", lambda self, **kwargs: SimpleNamespace(checkpoint_score=20, misconception_tags=["tag1"], recommended_next_step="/fix_gaps", breakdown="Breakdown"))
+    monkeypatch.setattr(handlers.LearningService, "detect_weak_skills_for_topic", lambda self, **kwargs: ["low_review_retention"])
+    monkeypatch.setattr(handlers.LearningService, "update_mastery_for_topic", lambda self, **kwargs: ({"score": 40, "confidence": 0.4}, ["tag1"]))
+    message = FakeMessage(user_id=1, text="/checkpoint")
+    await handlers.cmd_checkpoint(message)
+    assert any("Checkpoint стартовал" in item["text"] for item in message.answers)
+    assert any("Checkpoint Q1/" in item["text"] for item in message.answers)
+    assert any(item["event_name"] == "checkpoint_started" for item in tracked)
+
+
+@pytest.mark.asyncio
+async def test_fix_gaps_builds_playlist(monkeypatch):
+    tracked = []
+    monkeypatch.setattr(handlers, "_check_allow", lambda message: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+    monkeypatch.setattr(
+        handlers,
+        "ChatDBService",
+        lambda db: SimpleNamespace(
+            ensure_user=lambda *a, **k: SimpleNamespace(id="u-1", settings={"weak_skills": ["topic:therapy"]}),
+            get_topic_for_chat_thread=lambda *a, **k: SimpleNamespace(id="t-1", subject_id="sub-1", title="Терапия"),
+        ),
+    )
+    monkeypatch.setattr(handlers, "ProductAnalyticsService", lambda db: SimpleNamespace(track=lambda **kwargs: tracked.append(kwargs)))
+    monkeypatch.setattr(handlers.LearningService, "build_daily_route", lambda self, **kwargs: SimpleNamespace(high_risk_block_count=1, weak_topics=["topic:therapy"]))
+    monkeypatch.setattr(
+        handlers.LearningService,
+        "build_remediation_plan",
+        lambda self, **kwargs: SimpleNamespace(
+            weak_skills=["topic:therapy"],
+            steps=[
+                {"kind": "mini_case", "title": "Mini", "command": "/case basic"},
+                {"kind": "card", "title": "Card1", "command": "/cards"},
+                {"kind": "card", "title": "Card2", "command": "/cards"},
+                {"kind": "card", "title": "Card3", "command": "/cards"},
+                {"kind": "micro_quiz", "title": "Quiz", "command": "/quiz"},
+            ],
+            safety_framing=True,
+            recommended_next_step="/today light",
+        ),
+    )
+    message = FakeMessage(user_id=1, text="/fix_gaps")
+    await handlers.cmd_fix_gaps(message)
+    assert any("Adaptive remediation playlist" in item["text"] for item in message.answers)
+    assert any(item["event_name"] == "remediation_plan_generated" for item in tracked)

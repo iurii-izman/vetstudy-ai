@@ -57,6 +57,16 @@ class JsonFormatter(logging.Formatter):
             "consumer",
             "pending_count",
             "oldest_pending_seconds",
+            "topic_id",
+            "safety_intent",
+            "safety_action",
+            "safety_allowed",
+            "risk_tags_count",
+            "retrieval_results",
+            "retrieval_titles",
+            "effective_mode",
+            "high_risk",
+            "callback_action",
         ):
             value = getattr(record, key, None)
             if value is not None:

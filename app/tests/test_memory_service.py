@@ -147,3 +147,23 @@ async def test_document_chunk_search_included_and_user_isolated():
     assert len(results) == 1
     assert results[0].document_id == "d1"
     assert results[0].chunk_id == "c1"
+
+
+@pytest.mark.asyncio
+async def test_retrieval_filters_stale_partial_matches():
+    rows = [
+        _item(2, user_id="u1", topic_id="t1", content="Лишай у кошки 5 лет, очаги на морде и ушах", tags=["species"], emb=[0.0, 0.0, 0.0]),
+        _item(1, user_id="u1", topic_id="t1", content="Кошку укусила собака, травма грудной клетки и боль", tags=["species"], emb=[0.0, 0.0, 0.0]),
+    ]
+    service = MemoryService(FakeMemoryRepo(rows), topic_repo=FakeTopicRepo([SimpleNamespace(id="t1", title="Тема", telegram_thread_id=10)]), embedder=None)
+    results = await service.search(
+        db=None,
+        user_id="u1",
+        query="Кошка 3 кг укусила собака что делать",
+        current_topic_id="t1",
+        top_k=2,
+        cross_topic=True,
+    )
+    assert results
+    assert "укус" in results[0].snippet.lower()
+    assert all("лишай" not in item.snippet.lower() for item in results)

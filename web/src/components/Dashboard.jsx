@@ -23,6 +23,7 @@ export function Dashboard({ token, onLogout }) {
   const [adminErrors, setAdminErrors] = useState([])
   const [adminFeedback, setAdminFeedback] = useState([])
   const [analyticsSummary, setAnalyticsSummary] = useState({})
+  const [learningExperiments, setLearningExperiments] = useState({})
   const [costBudgetAlert, setCostBudgetAlert] = useState(null)
   const [coverage, setCoverage] = useState(null)
   const [needsCheck, setNeedsCheck] = useState([])
@@ -54,9 +55,10 @@ export function Dashboard({ token, onLogout }) {
     setError('')
     setLoadingApp(true)
     try {
-      const [topicsData, subjectsData, statsData, meData, modelData, errorsData, feedbackData, analyticsData, costAlertData, coverageData, checkData, traceData] = await Promise.all([
+      const [topicsData, subjectsData, statsData, meData, modelData, errorsData, feedbackData, analyticsData, learningExpData, costAlertData, coverageData, checkData, traceData] = await Promise.all([
         api.topics(token), api.subjects(token).catch(() => []), api.stats(token).catch(() => EMPTY_STATS), api.me(token).catch(() => null),
         api.modelSettings(token).catch(() => null), api.adminErrors(token).catch(() => []), api.adminFeedback(token).catch(() => []), api.adminAnalyticsSummary(token).catch(() => ({})),
+        api.adminLearningExperiments(token).catch(() => ({})),
         api.adminCostBudgetAlert(token).catch(() => null),
         api.sourceCoverage(token).catch(() => null), api.needsCheck(token).catch(() => []),
         api.trustSafetyTrace(token).catch(() => []),
@@ -70,6 +72,7 @@ export function Dashboard({ token, onLogout }) {
       setAdminErrors(errorsData)
       setAdminFeedback(feedbackData)
       setAnalyticsSummary(analyticsData || {})
+      setLearningExperiments(learningExpData || {})
       setCostBudgetAlert(costAlertData)
       setCoverage(coverageData)
       setNeedsCheck(checkData)
@@ -194,7 +197,7 @@ export function Dashboard({ token, onLogout }) {
         <Routes>
           <Route path="/" element={<div className="workspace-grid"><WorkspaceScreen activePanel={activePanel} flashcards={flashcards} loadingTopic={loadingTopic} messages={messages} notes={notes} onEditNote={setEditingNote} searchResults={searchResults} setActivePanel={setActivePanel} onReviewCard={reviewCard} /><NoteEditor busy={savingNote} note={editingNote} onCancel={() => setEditingNote(null)} onSave={saveNote} /></div>} />
           <Route path="/review" element={<ReviewScreen cards={flashcards} revealed={revealedCards} onReveal={(cardId) => setRevealedCards((prev) => ({ ...prev, [cardId]: true }))} onReview={reviewCard} loading={loadingTopic} />} />
-          <Route path="/admin" element={<AdminScreen feedback={adminFeedback} analyticsSummary={analyticsSummary} costBudgetAlert={costBudgetAlert} stats={stats} trustTrace={trustTrace} onUpdateFeedback={updateFeedbackStatus} pendingFeedbackIds={pendingFeedbackIds} loading={loadingApp} />} />
+          <Route path="/admin" element={<AdminScreen feedback={adminFeedback} analyticsSummary={analyticsSummary} learningExperiments={learningExperiments} costBudgetAlert={costBudgetAlert} stats={stats} trustTrace={trustTrace} onUpdateFeedback={updateFeedbackStatus} pendingFeedbackIds={pendingFeedbackIds} loading={loadingApp} />} />
           <Route path="/settings" element={<SettingsScreen exportBusy={exportBusy} me={me} modelSettings={modelSettings} coverage={coverage} needsCheck={needsCheck} onExport={exportData} onLogout={onLogout} subjects={subjects} loading={loadingApp} />} />
         </Routes>
       </main>

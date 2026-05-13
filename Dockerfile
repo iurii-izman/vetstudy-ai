@@ -16,6 +16,10 @@ FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+LABEL org.opencontainers.image.title="vetstudy-app" \
+      org.opencontainers.image.description="VetStudy AI backend/bot/worker runtime image" \
+      org.opencontainers.image.vendor="VetStudy" \
+      org.opencontainers.image.licenses="Proprietary"
 
 RUN addgroup --system app && adduser --system --ingroup app app
 WORKDIR /app

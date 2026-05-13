@@ -43,6 +43,22 @@ class FakeMessage:
         self.answers.append({"text": text, **kwargs})
 
 
+class FakeMessageNoAnswersAttr:
+    """Mimics aiogram Message closer: no custom `.answers` attribute."""
+
+    def __init__(self, *, user_id=1, text=""):
+        self.from_user = SimpleNamespace(id=user_id, full_name="Test User", username=None)
+        self.chat = SimpleNamespace(id=100)
+        self.message_thread_id = None
+        self.text = text
+        self.message_id = 42
+        self.bot = SimpleNamespace()
+        self._sent: list[dict] = []
+
+    async def answer(self, text, **kwargs):
+        self._sent.append({"text": text, **kwargs})
+
+
 class FakeDB:
     def close(self): pass
     def commit(self): pass
@@ -420,3 +436,28 @@ async def test_case_answer_response_contains_safety_disclaimer(monkeypatch):
         or "реального животного" in combined.lower()
         or "очная консультация" in combined.lower()
     ), f"Safety disclaimer missing from case_answer response: {combined[:300]}"
+
+
+@pytest.mark.asyncio
+async def test_case_answer_does_not_require_test_only_answers_attr(monkeypatch):
+    monkeypatch.setattr(handlers, "_check_allow", lambda msg: True)
+    monkeypatch.setattr(handlers, "new_session", lambda: FakeDB())
+
+    case = CASES[0]
+    user = _make_user(case_id=case["id"])
+    _patch_user_repo(monkeypatch, user)
+    _patch_topic_repo(monkeypatch)
+    _patch_analytics(monkeypatch, [])
+
+    monkeypatch.setattr(
+        handlers,
+        "QuotaGuard",
+        lambda s: SimpleNamespace(check_user_and_global=lambda db, u: SimpleNamespace(allowed=True, message=None)),
+    )
+    monkeypatch.setattr(handlers, "get_settings", lambda: SimpleNamespace(allowed_user_ids=set(), allowed_usernames=set()))
+    monkeypatch.setattr(handlers.llm_router, "generate", lambda *a, **k: _async_return("Учебный разбор кейса."))
+
+    message = FakeMessageNoAnswersAttr(user_id=1, text="/case_answer Базовый анализ")
+    await handlers.cmd_case_answer(message)
+
+    assert message._sent

@@ -709,6 +709,19 @@ def admin_retrieval_quality(
     return ProductAnalyticsService(db).retrieval_quality(days=days)
 
 
+@router.get("/admin/analytics/learning-experiments")
+def admin_learning_experiments(
+    days: int = 30,
+    _: str = Depends(_check_token),
+    user: User = Depends(_get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not _allow_admin_rate_limit(user):
+        raise HTTPException(status_code=429, detail="Admin rate limit exceeded")
+    _require_admin(user)
+    return ProductAnalyticsService(db).learning_experiments(days=days)
+
+
 @router.patch("/admin/feedback/{feedback_id}")
 def admin_feedback_update(
     feedback_id: UUID,

@@ -384,6 +384,9 @@ def test_profile_endpoints_and_admin_analytics_summary():
     retrieval = client.get("/api/web/admin/analytics/retrieval-quality", headers=_owner_headers())
     assert retrieval.status_code == 200
     assert "retrieval_hit_rate" in retrieval.json()
+    learning_experiments = client.get("/api/web/admin/analytics/learning-experiments", headers=_owner_headers())
+    assert learning_experiments.status_code == 200
+    assert "kpis" in learning_experiments.json()
 
 
 def test_privacy_topic_delete_removes_raw_upload_file(tmp_path):

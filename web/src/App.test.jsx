@@ -28,6 +28,7 @@ function installFetchMock(overrides = {}) {
     }
     if (u.includes('/admin/feedback')) return { ok: true, json: async () => [{ id: 'f1', feedback_type: 'down', status: 'new' }] }
     if (u.includes('/admin/analytics/summary')) return { ok: true, json: async () => ({ behavior: { high_risk_query_count: 2 }, content_gap_report: { zero_results_total: 1, zero_results_by_topic: { Surgery: 1 } }, journey_health: { drop_points: { provider_error: 1 }, recovery_rate: 0.5, first_week_completion_rate: 0.4, first_value_10m_rate: 0.8 } }) }
+    if (u.includes('/admin/analytics/learning-experiments')) return { ok: true, json: async () => ({ kpis: { cta_step_completion_rate: 0.5, checkpoint_completion_rate: 0.4, remediation_completion_rate: 0.3, comeback_success_rate: 0.2 }, funnel: [{ step: 'cta_shown', count: 10, users: 5 }], checkpoint_table: [{ metric: 'started', count: 4 }], comeback_table: [{ metric: 'relaunches', count: 2 }] }) }
     if (u.includes('/admin/evidence/source-coverage')) return { ok: true, json: async () => ({ missing: false, total_sources: 2 }) }
     if (u.includes('/admin/evidence/needs-check')) return { ok: true, json: async () => [] }
     if (u.includes('/admin/trust-safety-trace')) return { ok: true, json: async () => [] }
@@ -73,6 +74,7 @@ describe('App', () => {
     await userEvent.click(screen.getByText('Admin'))
     await screen.findByText('Open negative feedback')
     await screen.findByText('Journey Health')
+    await screen.findByText('Learning Experiments')
     await screen.findByText('provider_error (1)')
     await userEvent.click(screen.getByText('resolved'))
     await waitFor(() => expect(global.fetch).toHaveBeenCalled())
