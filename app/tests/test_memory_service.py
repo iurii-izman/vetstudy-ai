@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.exc import StatementError
 
 from app.memory.service import MemoryService
 
@@ -50,6 +51,13 @@ class FakeChunkRepo:
         user_id = kwargs["user_id"]
         filtered = [x for x in self.rows if x[0].user_id == user_id]
         return filtered[: kwargs.get("top_k", 5)]
+
+
+class FailingOnVectorChunkRepo(FakeChunkRepo):
+    def search_hybrid(self, **kwargs):
+        if kwargs.get("query_vec"):
+            raise StatementError("vector dim mismatch", None, None, ValueError("expected 1536 dimensions, not 3072"))
+        return super().search_hybrid(**kwargs)
 
 
 def _item(idx, *, user_id, topic_id, content, tags=None, emb=None):
@@ -167,3 +175,31 @@ async def test_retrieval_filters_stale_partial_matches():
     assert results
     assert "укус" in results[0].snippet.lower()
     assert all("лишай" not in item.snippet.lower() for item in results)
+
+
+class WrongDimEmbedder:
+    async def embed(self, db, user_id, texts):
+        return [[0.1] * 3072]
+
+
+@pytest.mark.asyncio
+async def test_document_chunk_search_falls_back_when_vector_dimension_mismatch():
+    chunk = SimpleNamespace(
+        id="c1",
+        user_id="u1",
+        topic_id="t1",
+        document_id="d1",
+        content="Панкреатит подтверждён по УЗИ",
+        metadata_={"document_title": "case.pdf"},
+        created_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        tags=[],
+    )
+    service = MemoryService(
+        FakeMemoryRepo([]),
+        topic_repo=FakeTopicRepo([SimpleNamespace(id="t1", title="Тема", telegram_thread_id=10)]),
+        embedder=WrongDimEmbedder(),
+        chunk_repo=FailingOnVectorChunkRepo([(chunk, 1.0)]),
+    )
+    results = await service.search(db=None, user_id="u1", query="панкреатит", current_topic_id="t1", top_k=5, cross_topic=True)
+    assert results
+    assert results[0].chunk_id == "c1"

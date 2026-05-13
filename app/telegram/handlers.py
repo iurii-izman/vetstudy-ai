@@ -1090,10 +1090,18 @@ async def cmd_bind_topic(message: Message, command: CommandObject):
     db = new_session()
     try:
         user = UserRepo(db).get_or_create(message.from_user.id, message.from_user.full_name if message.from_user else None)
-        subject = SubjectRepo(db).get_by_slug_or_title(value)
+        subject_repo = SubjectRepo(db)
+        subject = subject_repo.get_by_slug_or_title(value)
+        if not subject:
+            # Self-heal: bootstrap default subjects when DB was initialized without seeds.
+            for slug, title, system_prompt in DEFAULT_SUBJECTS:
+                subject_repo.get_or_create(slug=slug, title=title, system_prompt=system_prompt)
+            subject = subject_repo.get_by_slug_or_title(value)
         if not subject:
             await message.answer(
-                "Тема не найдена в subjects. Проверьте slug/title или создайте subject в БД.",
+                "Тема не найдена в subjects.\n"
+                "Примеры: surgery | pharmacology | internal_medicine | anatomy | general\n"
+                "Или русские названия: Хирургия | Фармакология | ВНБ | Анатомия | Общее.",
             )
             return
         topic = TopicRepo(db).bind_subject(chat_id=message.chat.id, thread_id=thread_id, subject=subject)

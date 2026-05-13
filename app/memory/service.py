@@ -6,6 +6,7 @@ import json
 import math
 import re
 from typing import Any
+from sqlalchemy.exc import StatementError
 
 from app.db.models import MemoryItem, Topic
 from app.db.repositories import DocumentChunkRepo, MemoryRepo, TopicRepo
@@ -25,6 +26,7 @@ class SearchResult:
 
 
 class MemoryService:
+    VECTOR_DIM = 1536
     def __init__(self, memory_repo: MemoryRepo, *, topic_repo: TopicRepo | None = None, embedder: Any | None = None, chunk_repo: DocumentChunkRepo | None = None):
         self.memory_repo = memory_repo
         self.topic_repo = topic_repo
@@ -97,6 +99,10 @@ class MemoryService:
                     query_vec = self._vector_values(vectors[0])
             except Exception:
                 query_vec = []
+        if query_vec and len(query_vec) != self.VECTOR_DIM:
+            # Guard against provider/model switches that return another embedding dimension.
+            # Fallback to lexical/tag search to avoid pgvector dimension errors.
+            query_vec = []
 
         filtered = [r for r in all_rows if cross_topic or r.topic_id == current_topic_id]
         scored: list[tuple[float, MemoryItem]] = []
@@ -140,15 +146,26 @@ class MemoryService:
             for item in selected
         ]
         if self.chunk_repo:
-            chunk_rows = self.chunk_repo.search_hybrid(
-                user_id=user_id,
-                query=query,
-                query_tags=query_tags,
-                query_vec=query_vec,
-                current_topic_id=current_topic_id,
-                top_k=top_k,
-                cross_topic=cross_topic,
-            )
+            try:
+                chunk_rows = self.chunk_repo.search_hybrid(
+                    user_id=user_id,
+                    query=query,
+                    query_tags=query_tags,
+                    query_vec=query_vec,
+                    current_topic_id=current_topic_id,
+                    top_k=top_k,
+                    cross_topic=cross_topic,
+                )
+            except StatementError:
+                chunk_rows = self.chunk_repo.search_hybrid(
+                    user_id=user_id,
+                    query=query,
+                    query_tags=query_tags,
+                    query_vec=[],
+                    current_topic_id=current_topic_id,
+                    top_k=top_k,
+                    cross_topic=cross_topic,
+                )
             chunk_topic_map = self._topic_map([x[0] for x in chunk_rows])
             for chunk, _score in chunk_rows:
                 lexical_matches = self._token_overlap_count(query_terms, chunk.content)
