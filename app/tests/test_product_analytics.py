@@ -35,6 +35,8 @@ def test_product_analytics_summary_methods():
         service.track(user_id=user.id, event_name="journey_drop_detected", properties={"reason": "provider_error"})
         service.track(user_id=user.id, event_name="journey_recovered", properties={"after_days": 1})
         service.track(user_id=user.id, event_name="journey_state_changed", properties={"from": "activation", "to": "habit"})
+        service.track(user_id=user.id, event_name="context_compacted", properties={"saved_tokens_estimate": 120})
+        service.track(user_id=user.id, event_name="weekly_route_generated", properties={"days": 7})
         db.add(ProductEvent(user_id=user.id, event_name="search_performed", properties={"results": 0, "topic_title": "T"}, created_at=datetime.now(UTC) - timedelta(days=1)))
         db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 0, "memory_hits": 0, "document_hits": 0}))
         db.add(ProductEvent(user_id=user.id, event_name="retrieval_context_built", properties={"results": 3, "memory_hits": 2, "document_hits": 1}))
@@ -53,9 +55,11 @@ def test_product_analytics_summary_methods():
         conversions = service.ux_conversion_summary(days=30)
         journey = service.journey_health(days=30)
         outcomes = service.learning_outcomes(days=30)
+        experiments = service.learning_experiments(days=30)
         assert "events" in summary
         assert summary["events"].get("onboarding_step_completed", 0) == 1
         assert summary["events"].get("weekly_recap_opened", 0) == 1
+        assert summary["events"].get("context_compacted", 0) == 1
         assert adherence["learning_route_opened"] == 1
         assert adherence["learning_completed_actions"] == 1
         assert adherence["streak_milestones"] == 1
@@ -68,5 +72,27 @@ def test_product_analytics_summary_methods():
         assert "learning_gain_proxy" in outcomes
         assert "difficulty_fit" in outcomes
         assert "dropout_risk_score" in outcomes
+        assert "kpis" in experiments
+        assert "funnel" in experiments
+    finally:
+        db.close()
+
+
+def test_track_adds_experiment_tags_for_learning_events():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    try:
+        user = User(telegram_user_id=8, display_name="u2", settings={"learning": {"experiment": {"experiment_id": "exp-42", "variant": "B"}}})
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        service = ProductAnalyticsService(db)
+        row = service.track(user_id=user.id, event_name="learning_route_opened", properties={"due_count": 1})
+        assert row.properties["experiment_id"] == "exp-42"
+        assert row.properties["variant"] == "B"
+        non_learning = service.track(user_id=user.id, event_name="activation_start", properties={})
+        assert "experiment_id" not in (non_learning.properties or {})
     finally:
         db.close()

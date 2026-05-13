@@ -7,22 +7,68 @@ from typing import Any
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
-from app.db.models import ErrorEvent, FeedbackEvent, Message, ProductEvent, ReviewEvent, Session as ChatSession, Topic
+from app.db.models import ErrorEvent, FeedbackEvent, Message, ProductEvent, ReviewEvent, Session as ChatSession, Topic, User
 
 
 class ProductAnalyticsService:
+    _LEARNING_EVENT_PREFIXES = (
+        "learning_",
+        "checkpoint_",
+        "remediation_",
+        "recovery_",
+        "progression_",
+        "mastery_",
+        "weak_skill_",
+    )
+    _LEARNING_EVENT_NAMES = {
+        "overload_guard_triggered",
+        "resume_requested",
+        "resume_branch_selected",
+        "resume_completed",
+        "weekly_route_generated",
+        "weekly_route_completed",
+        "weekly_plan_opened",
+        "weekly_recap_opened",
+        "streak_milestone_reached",
+    }
+
     def __init__(self, db: Session):
         self.db = db
 
+    def _event_needs_experiment_tags(self, event_name: str) -> bool:
+        if event_name in self._LEARNING_EVENT_NAMES:
+            return True
+        return event_name.startswith(self._LEARNING_EVENT_PREFIXES)
+
+    def _resolve_experiment_tags(self, *, user_id) -> dict[str, str]:
+        if not hasattr(self.db, "execute"):
+            return {"experiment_id": "adaptive_mastery_loop_v1", "variant": "A"}
+        user = self.db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+        learning = dict(((user.settings or {}).get("learning") or {}) if user else {})
+        exp = dict(learning.get("experiment") or {})
+        return {
+            "experiment_id": str(exp.get("experiment_id") or "adaptive_mastery_loop_v1"),
+            "variant": str(exp.get("variant") or "A"),
+        }
+
+    def _enrich_properties(self, *, user_id, event_name: str, properties: dict[str, Any] | None) -> dict[str, Any]:
+        payload = dict(properties or {})
+        if self._event_needs_experiment_tags(event_name):
+            tags = self._resolve_experiment_tags(user_id=user_id)
+            payload.setdefault("experiment_id", tags["experiment_id"])
+            payload.setdefault("variant", tags["variant"])
+        return payload
+
     def track(self, *, user_id, event_name: str, topic_id=None, session_id=None, properties: dict[str, Any] | None = None) -> ProductEvent:
+        payload = self._enrich_properties(user_id=user_id, event_name=event_name, properties=properties)
         if not hasattr(self.db, "add") or not hasattr(self.db, "commit"):
-            return ProductEvent(user_id=user_id, topic_id=topic_id, session_id=session_id, event_name=event_name, properties=properties or {})
+            return ProductEvent(user_id=user_id, topic_id=topic_id, session_id=session_id, event_name=event_name, properties=payload)
         row = ProductEvent(
             user_id=user_id,
             topic_id=topic_id,
             session_id=session_id,
             event_name=event_name,
-            properties=properties or {},
+            properties=payload,
         )
         self.db.add(row)
         self.db.commit()
@@ -340,4 +386,64 @@ class ProductAnalyticsService:
             "dropout_risk_score": dropout_risk_score,
             "review_samples": len(scores),
             "route_samples": fit_total,
+        }
+
+    def learning_experiments(self, *, days: int = 30) -> dict[str, Any]:
+        since = datetime.now(UTC) - timedelta(days=days)
+        rows = self.db.execute(
+            select(ProductEvent.user_id, ProductEvent.event_name, ProductEvent.properties).where(ProductEvent.created_at >= since)
+        ).all()
+        by_event: Counter[str] = Counter()
+        users_by_event: dict[str, set[Any]] = {}
+        for user_id, event_name, props in rows:
+            _ = props or {}
+            by_event[event_name] += 1
+            users_by_event.setdefault(event_name, set()).add(user_id)
+
+        def rate(num: int, den: int) -> float:
+            return (num / den) if den else 0.0
+
+        cta_shown = by_event.get("learning_route_opened", 0)
+        cta_clicked = by_event.get("learning_cta_clicked", 0)
+        step_completed = by_event.get("learning_step_completed", 0)
+        checkpoints_started = by_event.get("checkpoint_started", 0)
+        checkpoints_completed = by_event.get("checkpoint_completed", 0)
+        remediation_generated = by_event.get("remediation_plan_generated", 0)
+        remediation_completed = by_event.get("remediation_plan_completed", 0)
+        dropout_nudges = by_event.get("return_after_dropout_nudge", 0)
+        comeback_success = by_event.get("learning_relaunched", 0)
+
+        funnel = [
+            {"step": "cta_shown", "count": int(cta_shown), "users": len(users_by_event.get("learning_route_opened", set()))},
+            {"step": "clicked", "count": int(cta_clicked), "users": len(users_by_event.get("learning_cta_clicked", set()))},
+            {"step": "step_completed", "count": int(step_completed), "users": len(users_by_event.get("learning_step_completed", set()))},
+        ]
+        checkpoints_table = [
+            {"metric": "started", "count": int(checkpoints_started)},
+            {"metric": "completed", "count": int(checkpoints_completed)},
+            {"metric": "completion_rate", "count": round(rate(checkpoints_completed, checkpoints_started), 4)},
+        ]
+        remediation_table = [
+            {"metric": "generated", "count": int(remediation_generated)},
+            {"metric": "completed", "count": int(remediation_completed)},
+            {"metric": "completion_rate", "count": round(rate(remediation_completed, remediation_generated), 4)},
+        ]
+        comeback_table = [
+            {"metric": "dropout_nudges", "count": int(dropout_nudges)},
+            {"metric": "relaunches", "count": int(comeback_success)},
+            {"metric": "success_rate", "count": round(rate(comeback_success, dropout_nudges), 4)},
+        ]
+
+        return {
+            "days": days,
+            "kpis": {
+                "checkpoint_completion_rate": round(rate(checkpoints_completed, checkpoints_started), 4),
+                "remediation_completion_rate": round(rate(remediation_completed, remediation_generated), 4),
+                "comeback_success_rate": round(rate(comeback_success, dropout_nudges), 4),
+                "cta_step_completion_rate": round(rate(step_completed, cta_shown), 4),
+            },
+            "funnel": funnel,
+            "checkpoint_table": checkpoints_table,
+            "remediation_table": remediation_table,
+            "comeback_table": comeback_table,
         }
